@@ -18,7 +18,7 @@ Homepage = "https://github.com/gregory-richard/comfyui-civitai-updater"
 Issues = "https://github.com/gregory-richard/comfyui-civitai-updater/issues"
 
 [tool.comfy]
-PublisherId = "<YOUR_PUBLISHER_ID>"
+PublisherId = "42b8de9b-71ac-43a8-bf00-c5bc7f839f70"
 DisplayName = "Civitai Updater"
 Icon = "https://raw.githubusercontent.com/gregory-richard/comfyui-civitai-updater/main/assets/registry/icon.png"
 Banner = "https://raw.githubusercontent.com/gregory-richard/comfyui-civitai-updater/main/assets/registry/banner.png"

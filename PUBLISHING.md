@@ -1,7 +1,7 @@
 # Publishing Checklist (Comfy Registry)
 
 1. Fill placeholders in `pyproject.toml`:
-   - `tool.comfy.PublisherId`
+   - `tool.comfy.PublisherId` (UUID from your Registry profile, not the API token)
    - confirm `tool.comfy.Icon` / `tool.comfy.Banner` raw GitHub URLs
 2. Push assets:
    - `assets/registry/icon.png` (400x400)

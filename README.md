@@ -57,3 +57,9 @@ Use `Settings -> Civitai Updater`.
 
 This project was built based on:
 - https://github.com/zixaphir/Stable-Diffusion-Webui-Civitai-Helper
+
+## AI Tooling Disclosure
+
+This extension was primarily created with AI-assisted development using:
+- GPT-5.3-Codex
+- Claude Opus 4.6
