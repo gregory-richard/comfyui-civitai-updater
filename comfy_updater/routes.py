@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from aiohttp import web
 
 from .constants import SUPPORTED_MODEL_TYPES
 from .path_resolver import normalize_model_types
+from .sidecar import read_json, write_json
 
 try:
     from server import PromptServer
@@ -64,11 +67,87 @@ def register_routes(config_store, updater_service, job_manager) -> None:
     async def start_check_updates_job(request):
         payload = await _read_json(request)
         payload = _normalize_job_payload(payload)
-        job = job_manager.start(
-            "check-updates",
-            lambda progress, item, control: updater_service.run_check_updates(payload, progress, item, control),
-        )
-        return web.json_response({"jobId": job.id})
+
+        progress_path = config_store.data_dir / "progress.json"
+        cache_path = config_store.data_dir / "last_check.json"
+        item_count = 0
+
+        def runner(progress, item_cb, control):
+            nonlocal item_count
+
+            def item_cb_with_progress(item):
+                nonlocal item_count
+                item_cb(item)
+                item_count += 1
+                if item_count % 5 == 0:
+                    _write_progress(progress_path, accumulated_items=None, job_ref=job_ref)
+
+            summary, items = updater_service.run_check_updates(
+                payload, progress, item_cb_with_progress, control,
+            )
+            if not control.is_cancelled():
+                write_json(cache_path, {
+                    "checkedAt": datetime.now(timezone.utc).isoformat(),
+                    "summary": summary,
+                    "items": items,
+                })
+            progress_path.unlink(missing_ok=True)
+            return summary, items
+
+        job_ref = job_manager.start("check-updates", runner)
+        _write_progress(progress_path, accumulated_items=None, job_ref=job_ref)
+        return web.json_response({"jobId": job_ref.id})
+
+    @routes.get("/civitai-updater/last-check")
+    async def get_last_check(request):  # noqa: ARG001
+        progress_path = config_store.data_dir / "progress.json"
+        progress_data = read_json(progress_path)
+
+        active = job_manager.get_active()
+        if progress_data and active:
+            return web.json_response({
+                "data": {
+                    "jobId": active.id,
+                    "checkedAt": active.startedAt or "",
+                    "summary": active.summary,
+                    "itemCount": len(active.items),
+                    "inProgress": True,
+                }
+            })
+
+        if progress_data and not active:
+            progress_path.unlink(missing_ok=True)
+
+        cache_path = config_store.data_dir / "last_check.json"
+        data = read_json(cache_path)
+        if not data:
+            return web.json_response({"data": None})
+        job = job_manager.load_cached_check(data)
+
+        cached_paths = {str(item.get("modelPath", "")).lower() for item in data.get("items", []) if item.get("modelPath")}
+        current_paths = updater_service.list_current_file_paths()
+        added = len(current_paths - cached_paths)
+        removed = len(cached_paths - current_paths)
+
+        return web.json_response({
+            "data": {
+                "jobId": job.id,
+                "checkedAt": data.get("checkedAt", ""),
+                "summary": data.get("summary", {}),
+                "itemCount": len(data.get("items", [])),
+                "inProgress": False,
+                "filesChanged": added + removed > 0,
+                "filesAdded": added,
+                "filesRemoved": removed,
+            }
+        })
+
+    @routes.get("/civitai-updater/jobs/active")
+    async def get_active_job(request):  # noqa: ARG001
+        active = job_manager.get_active()
+        if not active:
+            return web.json_response({"job": None})
+        return web.json_response({"job": active.as_dict(include_items=False)})
 
     @routes.get("/civitai-updater/jobs/{job_id}")
     async def get_job(request):
@@ -87,12 +166,18 @@ def register_routes(config_store, updater_service, job_manager) -> None:
         mode = request.query.get("mode", "").strip().lower() or None
         if mode not in (None, "updates"):
             return web.json_response({"error": "invalid mode"}, status=400)
+        model_type = request.query.get("modelType", "").strip() or None
+        base_model = request.query.get("baseModel", "").strip() or None
+        sort = request.query.get("sort", "").strip().lower() or None
 
-        result = job_manager.get_items(job_id, offset=offset, limit=limit, mode=mode)
+        result = job_manager.get_items(
+            job_id, offset=offset, limit=limit, mode=mode,
+            model_type=model_type, base_model=base_model, sort=sort,
+        )
         if not result:
             return web.json_response({"error": "job not found"}, status=404)
 
-        total_items, safe_offset, safe_limit, items = result
+        total_items, safe_offset, safe_limit, items, facets = result
         return web.json_response(
             {
                 "jobId": job_id,
@@ -100,6 +185,7 @@ def register_routes(config_store, updater_service, job_manager) -> None:
                 "offset": safe_offset,
                 "limit": safe_limit,
                 "mode": mode,
+                "facets": facets,
                 "items": items,
             }
         )
@@ -159,6 +245,8 @@ def _normalize_config_payload(payload: dict) -> dict:
         key = payload.get("apiKey")
         incoming["apiKey"] = key if isinstance(key, str) else ""
 
+    if "cacheTtlMinutes" in payload:
+        incoming["cacheTtlMinutes"] = payload.get("cacheTtlMinutes")
     if "requestTimeoutSeconds" in payload:
         incoming["requestTimeoutSeconds"] = payload.get("requestTimeoutSeconds")
     if "maxRetries" in payload:
@@ -191,6 +279,18 @@ def _normalize_paths_value(entries) -> list[str]:
     if isinstance(entries, list):
         return [item.strip() for item in entries if isinstance(item, str) and item.strip()]
     return []
+
+
+def _write_progress(progress_path, *, accumulated_items, job_ref) -> None:
+    try:
+        write_json(progress_path, {
+            "jobId": job_ref.id,
+            "startedAt": job_ref.startedAt or "",
+            "progress": job_ref.progress,
+            "total": job_ref.total,
+        })
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _read_int_query(request, key: str, default: int, minimum: int, maximum: int) -> int:

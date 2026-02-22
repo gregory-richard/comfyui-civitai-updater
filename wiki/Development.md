@@ -17,10 +17,10 @@
 
 Files written beside model files:
 
-- `.civitai.info`
-- `.civitai.state.json`
+- `.civitai.info` — cached model identity from Civitai
+- `.preview.jpeg` — preview image downloaded from Civitai
 
-These are the cache layer for scan/check results.
+Check results are stored centrally in `.civitai_updater/last_check.json`.
 
 ## Compatibility target
 

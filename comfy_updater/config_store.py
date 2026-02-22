@@ -9,6 +9,7 @@ from .constants import SUPPORTED_MODEL_TYPES
 
 DEFAULT_CONFIG = {
     "apiKey": "",
+    "cacheTtlMinutes": 240,
     "requestTimeoutSeconds": 30,
     "maxRetries": 4,
     "requestDelayMs": 120,
@@ -48,6 +49,7 @@ class ConfigStore:
 
         for key in (
             "apiKey",
+            "cacheTtlMinutes",
             "requestTimeoutSeconds",
             "maxRetries",
             "requestDelayMs",
@@ -69,6 +71,9 @@ class ConfigStore:
                         if isinstance(path, str) and path.strip()
                     ]
 
+        merged["cacheTtlMinutes"] = _int_in_range(
+            merged["cacheTtlMinutes"], default=240, minimum=0, maximum=10080
+        )
         merged["requestTimeoutSeconds"] = _int_in_range(
             merged["requestTimeoutSeconds"], default=30, minimum=5, maximum=300
         )

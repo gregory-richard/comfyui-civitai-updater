@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from pathlib import Path
 import time
 import requests
 
@@ -29,14 +29,24 @@ class CivitaiClient:
         return self._get_json(f"{MODEL_VERSION_BY_ID_URL}/{version_id}")
 
     def get_latest_version_for_model(self, model_id: int | str) -> dict | None:
+        """Return the primary version as determined by Civitai (first in the array).
+
+        The API returns modelVersions ordered by the creator's chosen `index`,
+        not by date. Sorting by createdAt would override the creator's intent —
+        e.g. a Wan Video variant added after the main Flux version would wrongly
+        appear as the "latest".
+        """
         model = self.get_model(model_id)
         if not model:
             return None
         versions = model.get("modelVersions") or []
         if not versions:
             return None
-        versions = sorted(versions, key=_version_sort_key, reverse=True)
-        return versions[0]
+        latest = versions[0]
+        creator = model.get("creator")
+        if isinstance(creator, dict):
+            latest["_creatorName"] = creator.get("username") or ""
+        return latest
 
     def model_page_url(self, model_id: int | str) -> str:
         return f"{MODEL_PAGE_BASE_URL}/{model_id}"
@@ -45,6 +55,31 @@ class CivitaiClient:
         if version_id:
             return f"{MODEL_PAGE_BASE_URL}/{model_id}?modelVersionId={version_id}"
         return self.model_page_url(model_id)
+
+    def download_file(self, url: str, target_path: Path, max_bytes: int = 10_000_000) -> bool:
+        """Download a file (e.g. preview image) to *target_path*. Returns True on success."""
+        try:
+            response = self.session.get(
+                url, timeout=self.timeout_seconds, headers=self.default_headers, stream=True
+            )
+            if not response.ok:
+                return False
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = target_path.with_suffix(f"{target_path.suffix}.tmp")
+            written = 0
+            with tmp_path.open("wb") as fh:
+                for chunk in response.iter_content(chunk_size=8192):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        tmp_path.unlink(missing_ok=True)
+                        return False
+                    fh.write(chunk)
+            tmp_path.replace(target_path)
+            return True
+        except Exception:  # noqa: BLE001
+            if target_path.with_suffix(f"{target_path.suffix}.tmp").exists():
+                target_path.with_suffix(f"{target_path.suffix}.tmp").unlink(missing_ok=True)
+            return False
 
     def _get_json(self, url: str) -> dict | None:
         last_error = None
@@ -78,21 +113,4 @@ class CivitaiClient:
 
 def _retry_delay_seconds(attempt: int) -> float:
     return min(10.0, 0.5 * (2**attempt))
-
-
-def _version_sort_key(version: dict) -> tuple:
-    created_at = version.get("createdAt") or version.get("publishedAt") or ""
-    try:
-        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        created_ts = parsed.timestamp()
-    except ValueError:
-        created_ts = 0
-
-    version_id = version.get("id") or 0
-    try:
-        numeric_id = int(version_id)
-    except (TypeError, ValueError):
-        numeric_id = 0
-
-    return (created_ts, numeric_id)
 

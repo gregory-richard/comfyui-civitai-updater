@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "civitai-updater"
+version = "1.0.0"
+description = "ComfyUI extension to scan local Civitai models and check for newer versions."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "requests>=2.31.0",
+]
+
+[project.urls]
+Repository = "https://github.com/gregory-richard/comfyui-civitai-updater"
+Homepage = "https://github.com/gregory-richard/comfyui-civitai-updater"
+Issues = "https://github.com/gregory-richard/comfyui-civitai-updater/issues"
+
+[tool.comfy]
+PublisherId = "<YOUR_PUBLISHER_ID>"
+DisplayName = "Civitai Updater"
+Icon = "https://raw.githubusercontent.com/gregory-richard/comfyui-civitai-updater/main/assets/registry/icon.png"
+Banner = "https://raw.githubusercontent.com/gregory-richard/comfyui-civitai-updater/main/assets/registry/banner.png"

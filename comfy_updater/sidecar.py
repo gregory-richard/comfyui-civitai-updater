@@ -3,15 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .constants import INFO_SIDECAR_SUFFIX, STATE_SIDECAR_SUFFIX
+from .constants import INFO_SIDECAR_SUFFIX, PREVIEW_SIDECAR_SUFFIX
 
 
 def info_sidecar_path(model_path: Path) -> Path:
     return model_path.with_suffix(f"{INFO_SIDECAR_SUFFIX}")
 
 
-def state_sidecar_path(model_path: Path) -> Path:
-    return model_path.with_suffix(f"{STATE_SIDECAR_SUFFIX}")
+def preview_sidecar_path(model_path: Path) -> Path:
+    return model_path.with_suffix(f"{PREVIEW_SIDECAR_SUFFIX}")
 
 
 def read_json(path: Path) -> dict | None:
