@@ -30,5 +30,5 @@ SUPPORTED_MODEL_EXTENSIONS = (
 )
 
 INFO_SIDECAR_SUFFIX = ".civitai.info"
-PREVIEW_SIDECAR_SUFFIX = ".preview.jpeg"
+PREVIEW_SIDECAR_SUFFIX = ".preview.png"
 

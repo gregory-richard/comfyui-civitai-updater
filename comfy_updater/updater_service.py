@@ -187,6 +187,7 @@ class UpdaterService:
 
         existing_info = read_json(info_path)
         if mode == "scan" and existing_info and not refetch_metadata:
+            _download_preview_if_needed(client, model_path, existing_info, force=False)
             _skip_url, _skip_type = _first_preview(existing_info)
             return {
                 "modelPath": str(model_path),
@@ -221,6 +222,14 @@ class UpdaterService:
             and existing_info.get("modelId")
             and existing_info.get("id")
         )
+        can_refetch_by_sidecar_id = (
+            mode == "scan"
+            and refetch_metadata
+            and not force_rehash
+            and existing_info
+            and existing_info.get("modelId")
+            and existing_info.get("id")
+        )
 
         if can_use_sidecar:
             model_id = existing_info.get("modelId")
@@ -234,6 +243,18 @@ class UpdaterService:
                 "model": existing_info.get("model", {}),
                 "images": existing_info.get("images", []),
             }
+            _download_preview_if_needed(client, model_path, version_data, force=False)
+        elif can_refetch_by_sidecar_id:
+            model_id = existing_info.get("modelId")
+            version_data = client.get_version(existing_info.get("id"))
+            if version_data:
+                model_id = version_data.get("modelId") or model_id
+            else:
+                # Fallback when the sidecar version id is stale or unavailable.
+                local_hash = sha256_file(model_path)
+                version_data = client.get_version_by_hash(local_hash)
+                if version_data:
+                    model_id = version_data.get("modelId")
         else:
             local_hash = sha256_file(model_path)
             version_data = client.get_version_by_hash(local_hash)
@@ -284,7 +305,7 @@ class UpdaterService:
             if refetch_metadata or not existing_info:
                 write_json(info_path, sidecar_payload)
 
-            _download_preview_if_needed(client, model_path, version_data, force=refetch_metadata)
+            _download_preview_if_needed(client, model_path, version_data, force=False)
 
             return {
                 "modelPath": str(model_path),
@@ -406,20 +427,6 @@ def _first_download_url(version_data: dict) -> str | None:
     return None
 
 
-def _first_preview_url(version_data: dict) -> str | None:
-    """Image-only preview URL (used for downloading sidecar thumbnails)."""
-    images = version_data.get("images") or []
-    for image in images:
-        if not isinstance(image, dict):
-            continue
-        if image.get("type") != "image":
-            continue
-        url = image.get("url")
-        if isinstance(url, str) and url:
-            return url
-    return None
-
-
 def _first_preview(version_data: dict) -> tuple[str, str]:
     """Return (url, media_type) preferring images, falling back to video."""
     images = version_data.get("images") or []
@@ -453,13 +460,16 @@ def _download_preview_if_needed(
     version_data: dict,
     force: bool = False,
 ) -> None:
-    preview_url = _first_preview_url(version_data)
+    preview_url, preview_type = _first_preview(version_data)
     if not preview_url:
         return
     preview_path = preview_sidecar_path(model_path)
     if not force and preview_path.exists():
         return
-    client.download_file(preview_url, preview_path)
+    if preview_type == "video":
+        client.download_video_first_frame_as_png(preview_url, preview_path)
+        return
+    client.download_image_as_png(preview_url, preview_path)
 
 
 def _utc_now() -> str:

@@ -119,7 +119,7 @@ async function renderTab(el) {
   root.innerHTML = `
     <header class="cu-hero">
       <div class="cu-hero-title">Civitai</div>
-      <p class="cu-hero-sub">Check local models for newer versions on Civitai</p>
+      <p class="cu-hero-sub">Scan local models and check for newer versions on Civitai</p>
     </header>
 
     <section class="cu-card">
@@ -131,7 +131,7 @@ async function renderTab(el) {
           <div class="cu-label">Options</div>
           <label class="cu-option" title="Re-identify every model by recomputing its SHA256 hash, even if cached metadata exists. Use this after manually replacing model files — the cache won't know the file changed otherwise."><input id="cu-rehash" type="checkbox"><span>Force rehash</span></label>
           <p class="cu-option-hint">Re-identify models from scratch. Use after replacing files.</p>
-          <label class="cu-option" title="During metadata scans, re-fetch info from Civitai even for models that already have a .civitai.info file."><input id="cu-refetch" type="checkbox"><span>Refetch existing metadata during scans</span></label>
+          <label class="cu-option" title="During metadata scans, re-fetch info from Civitai for models that already have a .civitai.info file. Uses sidecar version IDs for speed; enable Force rehash if files were manually replaced."><input id="cu-refetch" type="checkbox"><span>Refetch existing metadata during scans</span></label>
           <div class="cu-divider"></div>
           <div class="cu-head">
             <div class="cu-label">Resolved Roots</div>
@@ -145,8 +145,8 @@ async function renderTab(el) {
 
     <section class="cu-card">
       <div class="cu-action-bar">
-        <button id="cu-check" class="cu-btn cu-btn-primary" title="Compare local versions with latest Civitai releases">Check Updates</button>
-        <button id="cu-scan" class="cu-btn cu-btn-outline" title="Refresh sidecar metadata only — no update check. Run this first if Check Updates seems to miss files.">Scan Metadata</button>
+        <button id="cu-check" class="cu-btn cu-btn-primary" title="Scan files and compare local versions with latest Civitai releases">Scan + Check Updates</button>
+        <button id="cu-scan" class="cu-btn cu-btn-outline" title="Scan files and refresh sidecar metadata only (no update comparison).">Scan Only (Metadata)</button>
       </div>
       <div id="cu-cache-info" class="cu-cache-info"></div>
       <div id="cu-progress-wrap" class="cu-progress-wrap" style="display:none">
@@ -166,7 +166,7 @@ async function renderTab(el) {
         <select id="cu-size" title="Results per page">${PAGE_SIZES.map((v) => `<option value="${v}">${v}</option>`).join("")}</select>
       </div>
       <div id="cu-scan-report" class="cu-scan-report"></div>
-      <div id="cu-check-summary" class="cu-summary">No check has run yet.</div>
+      <div id="cu-check-summary" class="cu-summary">No scan+check has run yet.</div>
       <div class="cu-filters">
         <select id="cu-filter-type" title="Filter by model type"><option value="">All types</option></select>
         <select id="cu-filter-base" title="Filter by base model"><option value="">All bases</option></select>
@@ -242,7 +242,7 @@ async function loadCachedResults() {
         pollJob(activeResp.job.jobId);
         return;
       }
-      setStatus("Previous check was interrupted. Run Check Updates again.");
+      setStatus("Previous check was interrupted. Run Scan + Check Updates again.");
       return;
     }
 
@@ -364,7 +364,7 @@ async function startJob(endpoint, type) {
     renderResults();
     updateProgress(0, 0, true);
     updateControlButtons();
-    setStatus(type === "check-updates" ? "Checking for updates\u2026" : "Scanning metadata\u2026");
+    setStatus(type === "check-updates" ? "Scanning files and checking updates\u2026" : "Scanning files and refreshing metadata\u2026");
     pollJob(data.jobId);
   } catch (error) {
     setStatus(`Failed to start job: ${error.message}`);
@@ -427,7 +427,7 @@ function pollJob(jobId) {
 
       if (state.currentJobType === "scan" && job.summary && Object.keys(job.summary).length > 0) {
         state.scanSummary = job.summary;
-        state.scanHint = "Run Check Updates to see available updates.";
+        state.scanHint = "Run Scan + Check Updates to see available updates.";
         renderScanReport();
       }
 
@@ -443,7 +443,7 @@ function pollJob(jobId) {
         }
         if (state.currentJobType === "scan") {
           if (job.summary && Object.keys(job.summary).length > 0) state.scanSummary = job.summary;
-          state.scanHint = "Run Check Updates to see available updates.";
+          state.scanHint = "Run Scan + Check Updates to see available updates.";
           renderScanReport();
           renderResults();
         }
@@ -599,11 +599,11 @@ function renderResults() {
     const s = state.checkSummary;
     state.checkSummaryEl.textContent = `${s.total || 0} checked \u00b7 ${s.withUpdates || 0} updates \u00b7 ${s.notFound || 0} not found \u00b7 ${s.errors || 0} errors`;
   } else {
-    state.checkSummaryEl.textContent = "No check has run yet.";
+    state.checkSummaryEl.textContent = "No scan+check has run yet.";
   }
   state.resultsEl.innerHTML = "";
   if (!state.checkJobId) {
-    appendEmpty("Run Check Updates to see results.");
+    appendEmpty("Run Scan + Check Updates to see results.");
     renderPagination();
     return;
   }

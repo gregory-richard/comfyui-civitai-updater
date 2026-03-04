@@ -8,8 +8,8 @@ ComfyUI custom node extension focused on update visibility for local Civitai mod
 
 ## Core UX
 
-- `Check Updates` compares local model versions with latest Civitai releases.
-- `Scan Metadata` refreshes sidecar metadata only.
+- `Scan + Check Updates` scans files and compares local model versions with latest Civitai releases.
+- `Scan Only (Metadata)` scans files and refreshes sidecar metadata only.
 - Results are paginated (25/50/100) and filterable.
 - Long jobs support `Pause/Resume` and `Stop`.
 

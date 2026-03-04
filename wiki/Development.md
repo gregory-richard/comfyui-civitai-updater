@@ -18,7 +18,7 @@
 Files written beside model files:
 
 - `.civitai.info` — cached model identity from Civitai
-- `.preview.jpeg` — preview image downloaded from Civitai
+- `.preview.png` — preview image sidecar (image downloads are converted to PNG; video previews use first frame when available)
 
 Check results are stored centrally in `.civitai_updater/last_check.json`.
 
