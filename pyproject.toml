@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "civitai-updater"
-version = "1.0.0"
+version = "1.1.0"
 description = "ComfyUI extension to scan local Civitai models and check for newer versions."
 readme = "README.md"
 license = { text = "MIT License" }
