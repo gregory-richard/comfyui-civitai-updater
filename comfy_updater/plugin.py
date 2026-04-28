@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .archived_updates import ArchivedUpdateStore
 from .config_store import ConfigStore
 from .jobs import JobManager
 from .routes import register_routes
@@ -19,9 +20,9 @@ def initialize_plugin() -> None:
     data_dir = root_dir / ".civitai_updater"
 
     config_store = ConfigStore(data_dir)
+    archive_store = ArchivedUpdateStore(data_dir)
     updater_service = UpdaterService(config_store)
-    job_manager = JobManager()
-    register_routes(config_store, updater_service, job_manager)
+    job_manager = JobManager(archive_store)
+    register_routes(config_store, updater_service, job_manager, archive_store)
 
     _INITIALIZED = True
-

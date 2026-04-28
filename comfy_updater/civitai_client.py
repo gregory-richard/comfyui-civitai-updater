@@ -20,6 +20,7 @@ class CivitaiClient:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.session = requests.Session()
+        self._model_cache: dict[str, dict | None] = {}
         self.default_headers = {
             "User-Agent": "comfyui-civitai-updater/0.1",
         }
@@ -31,30 +32,24 @@ class CivitaiClient:
         return self._get_json(f"{VERSION_BY_HASH_URL}/{sha256_hash}")
 
     def get_model(self, model_id: int | str) -> dict | None:
-        return self._get_json(f"{MODEL_BY_ID_URL}/{model_id}")
+        key = str(model_id)
+        if key not in self._model_cache:
+            self._model_cache[key] = self._get_json(f"{MODEL_BY_ID_URL}/{model_id}")
+        return self._model_cache[key]
 
     def get_version(self, version_id: int | str) -> dict | None:
         return self._get_json(f"{MODEL_VERSION_BY_ID_URL}/{version_id}")
 
-    def get_latest_version_for_model(self, model_id: int | str) -> dict | None:
-        """Return the primary version as determined by Civitai (first in the array).
-
-        The API returns modelVersions ordered by the creator's chosen `index`,
-        not by date. Sorting by createdAt would override the creator's intent —
-        e.g. a Wan Video variant added after the main Flux version would wrongly
-        appear as the "latest".
-        """
+    def get_model_versions_for_model(self, model_id: int | str) -> tuple[str, list[dict]]:
         model = self.get_model(model_id)
         if not model:
-            return None
+            return ("", [])
         versions = model.get("modelVersions") or []
-        if not versions:
-            return None
-        latest = versions[0]
         creator = model.get("creator")
+        creator_name = ""
         if isinstance(creator, dict):
-            latest["_creatorName"] = creator.get("username") or ""
-        return latest
+            creator_name = creator.get("username") or ""
+        return (creator_name, versions)
 
     def model_page_url(self, model_id: int | str) -> str:
         return f"{MODEL_PAGE_BASE_URL}/{model_id}"

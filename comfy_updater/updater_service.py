@@ -71,16 +71,6 @@ class UpdaterService:
         files = _dedupe_model_files(list_model_files(roots))
         total = len(files)
 
-        version_index: dict[str, set[str]] = {}
-        if mode == "check":
-            for entry in files:
-                sidecar = read_json(info_sidecar_path(entry["path"]))
-                if sidecar:
-                    mid = str(sidecar.get("modelId") or "")
-                    vid = str(sidecar.get("id") or "")
-                    if mid and vid:
-                        version_index.setdefault(mid, set()).add(vid)
-
         progress(0, total, f"Discovered {total} model files")
 
         client = CivitaiClient(
@@ -117,7 +107,6 @@ class UpdaterService:
                     mode=mode,
                     refetch_metadata=refetch_metadata,
                     force_rehash=force_rehash,
-                    version_index=version_index,
                 )
             except Exception as exc:  # noqa: BLE001 - return per-file errors without killing the whole job
                 stats["errors"] += 1
@@ -181,7 +170,6 @@ class UpdaterService:
         mode: str,
         refetch_metadata: bool,
         force_rehash: bool,
-        version_index: dict[str, set[str]] | None = None,
     ) -> dict:
         info_path = info_sidecar_path(model_path)
 
@@ -203,8 +191,10 @@ class UpdaterService:
                 "latestVersionId": "",
                 "latestVersionName": "",
                 "latestBaseModel": "",
+                "latestVersionDate": "",
                 "previewUrl": _skip_url,
                 "previewType": _skip_type,
+                "remoteVersions": [],
                 "modelUrl": "",
                 "versionUrl": "",
                 "downloadUrl": "",
@@ -240,6 +230,7 @@ class UpdaterService:
                 "modelId": model_id,
                 "downloadUrl": existing_info.get("downloadUrl"),
                 "publishedAt": existing_info.get("publishedAt", ""),
+                "createdAt": existing_info.get("createdAt", ""),
                 "model": existing_info.get("model", {}),
                 "images": existing_info.get("images", []),
             }
@@ -274,6 +265,7 @@ class UpdaterService:
                 "lastCheckedAt": _utc_now(),
                 "previewUrl": "",
                 "previewType": "image",
+                "remoteVersions": [],
                 "modelUrl": "",
                 "versionUrl": "",
                 "downloadUrl": "",
@@ -320,33 +312,37 @@ class UpdaterService:
                 "latestVersionId": "",
                 "latestVersionName": "",
                 "latestBaseModel": "",
+                "latestVersionDate": "",
                 "hasUpdate": False,
                 "previewUrl": preview_url,
                 "previewType": preview_type,
+                "remoteVersions": [],
                 "modelUrl": model_url,
                 "versionUrl": version_url,
                 "downloadUrl": "",
                 "lastCheckedAt": _utc_now(),
             }
 
-        latest_version = client.get_latest_version_for_model(model_id) or {}
-        latest_id = latest_version.get("id")
-        local_id = version_data.get("id")
-        has_update = bool(latest_id and local_id and str(latest_id) != str(local_id))
-        if has_update and version_index and str(latest_id) in version_index.get(str(model_id), set()):
-            has_update = False
-
-        creator_name = latest_version.get("_creatorName", "")
+        creator_name, model_versions = client.get_model_versions_for_model(model_id)
+        remote_versions = _normalize_remote_versions(client, model_id, model_versions)
+        local_id = str(version_data.get("id") or "")
+        local_date = _version_date(version_data)
+        new_versions = [
+            remote_version
+            for remote_version in remote_versions
+            if remote_version.get("versionDate")
+            and remote_version.get("versionId", "") != local_id
+            and local_date
+            and remote_version.get("versionDate", "") > local_date
+        ]
+        primary_new_version = new_versions[0] if new_versions else {}
         local_name = version_data.get("name", "")
-        latest_name = latest_version.get("name", local_name)
-        latest_download = _first_download_url(latest_version) or _first_download_url(version_data)
         local_preview_url, local_preview_type = _first_preview(version_data)
-        preview_url, preview_type = _first_preview(latest_version)
-        if not preview_url:
-            preview_url, preview_type = local_preview_url, local_preview_type
+        preview_url = primary_new_version.get("previewUrl", "") or local_preview_url
+        preview_type = primary_new_version.get("previewType", "image") or local_preview_type
 
         model_url = client.model_page_url(model_id)
-        version_url = client.version_page_url(model_id, latest_id or local_id)
+        version_url = primary_new_version.get("versionUrl", "") or client.version_page_url(model_id, local_id)
 
         if local_hash and version_data:
             sidecar_payload = dict(version_data)
@@ -367,20 +363,21 @@ class UpdaterService:
             "localHash": local_hash or "",
             "localVersionId": local_id,
             "localVersionName": local_name,
-            "localVersionDate": _version_date(version_data),
-            "latestVersionId": latest_id,
-            "latestVersionName": latest_name,
-            "latestBaseModel": latest_version.get("baseModel", ""),
-            "latestVersionDate": _version_date(latest_version),
-            "hasUpdate": has_update,
+            "localVersionDate": local_date,
+            "latestVersionId": primary_new_version.get("versionId", ""),
+            "latestVersionName": primary_new_version.get("versionName", ""),
+            "latestBaseModel": primary_new_version.get("baseModel", ""),
+            "latestVersionDate": primary_new_version.get("versionDate", ""),
+            "hasUpdate": bool(new_versions),
             "creatorName": creator_name,
             "previewUrl": preview_url,
             "previewType": preview_type,
             "localPreviewUrl": local_preview_url,
             "localPreviewType": local_preview_type,
+            "remoteVersions": remote_versions,
             "modelUrl": model_url,
             "versionUrl": version_url,
-            "downloadUrl": latest_download or "",
+            "downloadUrl": primary_new_version.get("downloadUrl", ""),
             "lastCheckedAt": _utc_now(),
         }
 
@@ -438,6 +435,37 @@ def _first_preview(version_data: dict) -> tuple[str, str]:
             if isinstance(url, str) and url:
                 return url, preferred
     return "", "image"
+
+
+def _normalize_remote_versions(
+    client: CivitaiClient,
+    model_id: int | str,
+    model_versions: list[dict] | None,
+) -> list[dict]:
+    normalized = []
+    for version_data in model_versions or []:
+        version_id = str(version_data.get("id") or "")
+        version_date = _version_date(version_data)
+        if not version_id or not version_date:
+            continue
+        preview_url, preview_type = _first_preview(version_data)
+        normalized.append(
+            {
+                "versionId": version_id,
+                "versionName": version_data.get("name", ""),
+                "versionDate": version_date,
+                "baseModel": version_data.get("baseModel", ""),
+                "previewUrl": preview_url,
+                "previewType": preview_type,
+                "versionUrl": client.version_page_url(model_id, version_id),
+                "downloadUrl": _first_download_url(version_data) or "",
+            }
+        )
+    normalized.sort(
+        key=lambda version: (version.get("versionDate", ""), version.get("versionName", "").lower()),
+        reverse=True,
+    )
+    return normalized
 
 
 def _set_sha256_hash(version_data: dict, sha256_hash: str) -> None:

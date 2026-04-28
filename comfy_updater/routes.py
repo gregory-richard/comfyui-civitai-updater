@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 
-from .constants import SUPPORTED_MODEL_TYPES
+from .constants import CACHE_SCHEMA_VERSION, SUPPORTED_MODEL_TYPES
 from .path_resolver import normalize_model_types
 from .sidecar import read_json, write_json
 
@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - only outside ComfyUI
 _ROUTES_REGISTERED = False
 
 
-def register_routes(config_store, updater_service, job_manager) -> None:
+def register_routes(config_store, updater_service, job_manager, archive_store) -> None:
     global _ROUTES_REGISTERED
     if _ROUTES_REGISTERED:
         return
@@ -85,8 +85,10 @@ def register_routes(config_store, updater_service, job_manager) -> None:
             summary, items = updater_service.run_check_updates(
                 payload, progress, item_cb_with_progress, control,
             )
+            summary = job_manager.summarize_check_items(summary, items)
             if not control.is_cancelled():
                 write_json(cache_path, {
+                    "schemaVersion": CACHE_SCHEMA_VERSION,
                     "checkedAt": datetime.now(timezone.utc).isoformat(),
                     "summary": summary,
                     "items": items,
@@ -122,6 +124,8 @@ def register_routes(config_store, updater_service, job_manager) -> None:
         data = read_json(cache_path)
         if not data:
             return web.json_response({"data": None})
+        if int(data.get("schemaVersion") or 0) != CACHE_SCHEMA_VERSION:
+            return web.json_response({"data": None, "cacheInvalid": True})
         job = job_manager.load_cached_check(data)
 
         cached_paths = {str(item.get("modelPath", "")).lower() for item in data.get("items", []) if item.get("modelPath")}
@@ -166,13 +170,14 @@ def register_routes(config_store, updater_service, job_manager) -> None:
         mode = request.query.get("mode", "").strip().lower() or None
         if mode not in (None, "updates"):
             return web.json_response({"error": "invalid mode"}, status=400)
-        model_type = request.query.get("modelType", "").strip() or None
-        base_model = request.query.get("baseModel", "").strip() or None
+        model_types = _read_multi_query(request, "modelType")
+        base_models = _read_multi_query(request, "baseModel")
+        show_hidden = request.query.get("showHidden", "0").lower() in ("1", "true", "yes")
         sort = request.query.get("sort", "").strip().lower() or None
 
         result = job_manager.get_items(
             job_id, offset=offset, limit=limit, mode=mode,
-            model_type=model_type, base_model=base_model, sort=sort,
+            model_types=model_types, base_models=base_models, sort=sort, show_hidden=show_hidden,
         )
         if not result:
             return web.json_response({"error": "job not found"}, status=404)
@@ -189,6 +194,24 @@ def register_routes(config_store, updater_service, job_manager) -> None:
                 "items": items,
             }
         )
+
+    @routes.post("/civitai-updater/archived-updates")
+    async def archive_updates(request):
+        payload = await _read_json(request)
+        model_id, version_ids = _normalize_archive_payload(payload)
+        if not model_id or not version_ids:
+            return web.json_response({"error": "modelId and versionIds are required"}, status=400)
+        archived = archive_store.archive(model_id, version_ids)
+        return web.json_response({"modelId": model_id, "archivedVersionIds": archived})
+
+    @routes.post("/civitai-updater/archived-updates/restore")
+    async def restore_updates(request):
+        payload = await _read_json(request)
+        model_id, version_ids = _normalize_archive_payload(payload)
+        if not model_id or not version_ids:
+            return web.json_response({"error": "modelId and versionIds are required"}, status=400)
+        archived = archive_store.restore(model_id, version_ids)
+        return web.json_response({"modelId": model_id, "archivedVersionIds": archived})
 
     @routes.post("/civitai-updater/jobs/{job_id}/pause")
     async def pause_job(request):
@@ -299,3 +322,24 @@ def _read_int_query(request, key: str, default: int, minimum: int, maximum: int)
     except (TypeError, ValueError):
         value = default
     return max(minimum, min(maximum, value))
+
+
+def _read_multi_query(request, key: str) -> list[str] | None:
+    values = [value.strip() for value in request.query.getall(key, []) if value and value.strip()]
+    return values if values else None
+
+
+def _normalize_archive_payload(payload: dict) -> tuple[str, list[str]]:
+    model_id = str(payload.get("modelId") or "").strip()
+    raw_version_ids = payload.get("versionIds")
+    version_ids = []
+    if isinstance(raw_version_ids, list):
+        normalized = set()
+        for version_id in raw_version_ids:
+            if version_id is None:
+                continue
+            cleaned = str(version_id).strip()
+            if cleaned:
+                normalized.add(cleaned)
+        version_ids = sorted(normalized)
+    return model_id, version_ids
