@@ -10,10 +10,11 @@ ComfyUI custom node extension focused on update visibility for local Civitai mod
 
 - `Scan + Check Updates` scans files and compares local model versions with latest Civitai releases.
 - `Scan Only (Metadata)` scans files and refreshes sidecar metadata only.
-- Results are paginated (25/50/100) and filterable.
+- Results are paginated (25/50/100), filterable, and can hide specific remote versions.
 - Long jobs support `Pause/Resume` and `Stop`.
 
 `Version` means a specific Civitai release of a model.
+`New` is now date-based: a remote version is shown only when its `publishedAt` date, or `createdAt` when `publishedAt` is missing, is newer than the newest installed local version date for that model.
 
 ## Installation
 
@@ -48,7 +49,9 @@ Use `Settings -> Civitai Updater`.
 - `POST /civitai-updater/jobs/scan`
 - `POST /civitai-updater/jobs/check-updates`
 - `GET /civitai-updater/jobs/{job_id}`
-- `GET /civitai-updater/jobs/{job_id}/items?offset&limit&mode=updates`
+- `GET /civitai-updater/jobs/{job_id}/items?offset&limit&mode=updates&showHidden=0|1&modelType=...&baseModel=...`
+- `POST /civitai-updater/archived-updates`
+- `POST /civitai-updater/archived-updates/restore`
 - `POST /civitai-updater/jobs/{job_id}/pause`
 - `POST /civitai-updater/jobs/{job_id}/resume`
 - `POST /civitai-updater/jobs/{job_id}/stop`

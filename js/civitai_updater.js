@@ -49,11 +49,13 @@ const state = {
   resultItems: [],
   resultTotal: 0,
   resultOffset: 0,
+  resultRequestSeq: 0,
   pageSize: PAGE_SIZES[0],
   pageOffset: 0,
   scanHint: "",
-  filterType: "",
-  filterBase: "",
+  filterTypes: null,
+  filterBases: null,
+  showHidden: false,
   sortOrder: "name",
   facets: { modelTypes: [], baseModels: [] },
 
@@ -67,6 +69,7 @@ const state = {
   checkSummaryEl: null,
   filterTypeEl: null,
   filterBaseEl: null,
+  showHiddenEl: null,
   resultsEl: null,
   pageInfoEl: null,
   prevEl: null,
@@ -168,8 +171,8 @@ async function renderTab(el) {
       <div id="cu-scan-report" class="cu-scan-report"></div>
       <div id="cu-check-summary" class="cu-summary">No scan+check has run yet.</div>
       <div class="cu-filters">
-        <select id="cu-filter-type" title="Filter by model type"><option value="">All types</option></select>
-        <select id="cu-filter-base" title="Filter by base model"><option value="">All bases</option></select>
+        <div id="cu-filter-type" class="cu-filter-slot"></div>
+        <div id="cu-filter-base" class="cu-filter-slot"></div>
         <select id="cu-sort" title="Sort results">
           <option value="name">Name A\u2013Z</option>
           <option value="name-desc">Name Z\u2013A</option>
@@ -177,6 +180,10 @@ async function renderTab(el) {
           <option value="latest-date-desc">Newest first</option>
           <option value="latest-date">Oldest first</option>
         </select>
+        <label class="cu-toggle" title="Show versions you previously hid">
+          <input id="cu-show-hidden" type="checkbox">
+          <span>Show hidden</span>
+        </label>
       </div>
       <div id="cu-results" class="cu-results"></div>
       <div class="cu-pagination">
@@ -197,6 +204,7 @@ async function renderTab(el) {
   state.checkSummaryEl = root.querySelector("#cu-check-summary");
   state.filterTypeEl = root.querySelector("#cu-filter-type");
   state.filterBaseEl = root.querySelector("#cu-filter-base");
+  state.showHiddenEl = root.querySelector("#cu-show-hidden");
   state.resultsEl = root.querySelector("#cu-results");
   state.pageInfoEl = root.querySelector("#cu-page");
   state.prevEl = root.querySelector("#cu-prev");
@@ -209,6 +217,7 @@ async function renderTab(el) {
   bindEvents(root);
   renderRoots();
   renderScanReport();
+  renderFilters();
   renderResults();
   updateControlButtons();
   root.querySelector("#cu-size").value = String(state.pageSize);
@@ -222,7 +231,12 @@ async function renderTab(el) {
 async function loadCachedResults() {
   try {
     const resp = await getJson("/civitai-updater/last-check");
-    if (!resp.data) return;
+    if (!resp.data) {
+      if (resp.cacheInvalid) {
+        setStatus("Cached results are from an older format. Run Scan + Check Updates again.");
+      }
+      return;
+    }
 
     if (resp.data.inProgress) {
       const activeResp = await getJson("/civitai-updater/jobs/active");
@@ -247,13 +261,18 @@ async function loadCachedResults() {
     }
 
     state.cachedJobId = resp.data.jobId;
+    state.checkJobId = resp.data.jobId;
     state.checkSummary = resp.data.summary || null;
     state.cachedAt = resp.data.checkedAt || null;
     state.cacheFilesChanged = resp.data.filesChanged
       ? { added: resp.data.filesAdded || 0, removed: resp.data.filesRemoved || 0 }
       : null;
     renderCacheInfo();
-    renderResults();
+    state.pageOffset = 0;
+    state.filterTypes = null;
+    state.filterBases = null;
+    applyFacets({ modelTypes: [], baseModels: [] });
+    await loadResultPage(true);
   } catch (_) {
     // cache load is best-effort
   }
@@ -274,18 +293,13 @@ function bindEvents(root) {
     state.pageOffset = 0;
     await loadResultPage(true);
   });
-  root.querySelector("#cu-filter-type").addEventListener("change", async (ev) => {
-    state.filterType = ev.target.value;
-    state.pageOffset = 0;
-    await loadResultPage(true);
-  });
-  root.querySelector("#cu-filter-base").addEventListener("change", async (ev) => {
-    state.filterBase = ev.target.value;
-    state.pageOffset = 0;
-    await loadResultPage(true);
-  });
   root.querySelector("#cu-sort").addEventListener("change", async (ev) => {
     state.sortOrder = ev.target.value;
+    state.pageOffset = 0;
+    await loadResultPage(true);
+  });
+  root.querySelector("#cu-show-hidden").addEventListener("change", async (ev) => {
+    state.showHidden = Boolean(ev.target.checked);
     state.pageOffset = 0;
     await loadResultPage(true);
   });
@@ -298,6 +312,40 @@ function bindEvents(root) {
     if (state.pageOffset + state.pageSize >= state.resultTotal) return;
     state.pageOffset += state.pageSize;
     await loadResultPage(true);
+  });
+  root.addEventListener("change", async (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.dataset.filterKind !== "type" && target.dataset.filterKind !== "base") return;
+    const key = target.dataset.filterKind === "type" ? "filterTypes" : "filterBases";
+    const value = target.dataset.filterValue || "";
+    const selected = new Set(state[key] || []);
+    if (target.checked) selected.add(value);
+    else selected.delete(value);
+    state[key] = [...selected];
+    state.pageOffset = 0;
+    renderFilters();
+    await loadResultPage(true);
+  });
+  root.addEventListener("click", async (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLElement)) return;
+    const filterAction = target.dataset.filterAction;
+    if (filterAction) {
+      const key = target.dataset.filterKind === "type" ? "filterTypes" : "filterBases";
+      const facetKey = target.dataset.filterKind === "type" ? "modelTypes" : "baseModels";
+      state[key] = filterAction === "all" ? [...(state.facets[facetKey] || [])] : [];
+      state.pageOffset = 0;
+      renderFilters();
+      await loadResultPage(true);
+      return;
+    }
+    if (target.dataset.archiveAction) {
+      const modelId = target.dataset.modelId || "";
+      const versionId = target.dataset.versionId || "";
+      if (!modelId || !versionId) return;
+      await toggleArchivedUpdate(modelId, versionId, target.dataset.archiveAction === "restore");
+    }
   });
 }
 
@@ -325,8 +373,8 @@ async function startJob(endpoint, type) {
       // Cache is still fresh — load the cached results without re-running.
       state.checkJobId = state.cachedJobId;
       state.pageOffset = 0;
-      state.filterType = "";
-      state.filterBase = "";
+      state.filterTypes = null;
+      state.filterBases = null;
       state.facets = { modelTypes: [], baseModels: [] };
       renderFilters();
       await loadResultPage(true);
@@ -356,8 +404,8 @@ async function startJob(endpoint, type) {
       state.resultItems = [];
       state.resultTotal = 0;
       state.resultOffset = 0;
-      state.filterType = "";
-      state.filterBase = "";
+      state.filterTypes = null;
+      state.filterBases = null;
       state.facets = { modelTypes: [], baseModels: [] };
       renderFilters();
     }
@@ -454,10 +502,11 @@ function pollJob(jobId) {
           setStatus("Job cancelled");
         } else if (state.currentJobType === "check-updates") {
           const updates = job.summary?.withUpdates || 0;
+          const hidden = job.summary?.hiddenUpdates || 0;
           state.cachedAt = new Date().toISOString();
           state.cacheFilesChanged = null;
           renderCacheInfo();
-          setStatus(`Done \u2014 ${updates} update${updates !== 1 ? "s" : ""} found`);
+          setStatus(`Done \u2014 ${updates} update${updates !== 1 ? "s" : ""} found${hidden ? `, ${hidden} hidden` : ""}`);
         } else {
           setStatus("Scan complete");
         }
@@ -489,35 +538,43 @@ function pollJob(jobId) {
 }
 
 async function loadResultPage(force) {
+  const requestSeq = ++state.resultRequestSeq;
   if (!state.checkJobId) {
     renderResults();
     return;
   }
   if (!isTabVisible() && !force) return;
+  if ((state.facets.modelTypes.length && Array.isArray(state.filterTypes) && state.filterTypes.length === 0) || (state.facets.baseModels.length && Array.isArray(state.filterBases) && state.filterBases.length === 0)) {
+    state.resultItems = [];
+    state.resultTotal = 0;
+    state.resultOffset = 0;
+    renderResults();
+    return;
+  }
   try {
     const query = new URLSearchParams({
       offset: String(state.pageOffset),
       limit: String(state.pageSize),
       mode: "updates",
       sort: state.sortOrder || "name",
+      showHidden: state.showHidden ? "1" : "0",
     });
-    if (state.filterType) query.set("modelType", state.filterType);
-    if (state.filterBase) query.set("baseModel", state.filterBase);
+    for (const modelType of state.filterTypes || []) query.append("modelType", modelType);
+    for (const baseModel of state.filterBases || []) query.append("baseModel", baseModel);
     const data = await getJson(`/civitai-updater/jobs/${state.checkJobId}/items?${query.toString()}`);
+    if (requestSeq !== state.resultRequestSeq) return;
     state.resultItems = Array.isArray(data.items) ? data.items : [];
     state.resultTotal = Number(data.totalItems || 0);
     state.resultOffset = Number(data.offset || 0);
     state.pageOffset = state.resultOffset;
     if (data.facets) {
-      state.facets = data.facets;
+      applyFacets(data.facets);
       renderFilters();
     }
     if (state.resultTotal > 0 && state.resultOffset >= state.resultTotal) {
       state.pageOffset = Math.max(0, Math.floor((state.resultTotal - 1) / state.pageSize) * state.pageSize);
-      if (!force) {
-        await loadResultPage(true);
-        return;
-      }
+      await loadResultPage(true);
+      return;
     }
     renderResults();
   } catch (error) {
@@ -538,7 +595,8 @@ function renderProgressCounts() {
     state.statusEl.textContent = `Scan: ${s.total || 0} total \u00b7 ${s.refreshed || 0} refreshed \u00b7 ${s.skipped || 0} skipped \u00b7 ${s.errors || 0} errors`;
     return;
   }
-  state.statusEl.textContent = `${s.total || 0} checked \u00b7 ${s.withUpdates || 0} updates \u00b7 ${s.notFound || 0} not found \u00b7 ${s.errors || 0} errors`;
+  const hidden = s.hiddenUpdates ? ` \u00b7 ${s.hiddenUpdates} hidden` : "";
+  state.statusEl.textContent = `${s.total || 0} checked \u00b7 ${s.withUpdates || 0} updates${hidden} \u00b7 ${s.notFound || 0} not found \u00b7 ${s.errors || 0} errors`;
 }
 
 function renderCacheInfo() {
@@ -597,7 +655,8 @@ function renderResults() {
   if (!state.resultsEl || !state.checkSummaryEl) return;
   if (state.checkSummary) {
     const s = state.checkSummary;
-    state.checkSummaryEl.textContent = `${s.total || 0} checked \u00b7 ${s.withUpdates || 0} updates \u00b7 ${s.notFound || 0} not found \u00b7 ${s.errors || 0} errors`;
+    const hidden = s.hiddenUpdates ? ` \u00b7 ${s.hiddenUpdates} hidden` : "";
+    state.checkSummaryEl.textContent = `${s.total || 0} checked \u00b7 ${s.withUpdates || 0} updates${hidden} \u00b7 ${s.notFound || 0} not found \u00b7 ${s.errors || 0} errors`;
   } else {
     state.checkSummaryEl.textContent = "No scan+check has run yet.";
   }
@@ -608,7 +667,13 @@ function renderResults() {
     return;
   }
   if (!state.resultItems.length) {
-    appendEmpty(state.resultTotal === 0 ? "No updates found." : "No items on this page.");
+    const noTypeSelection = Array.isArray(state.filterTypes) && state.facets.modelTypes.length && state.filterTypes.length === 0;
+    const noBaseSelection = Array.isArray(state.filterBases) && state.facets.baseModels.length && state.filterBases.length === 0;
+    if (noTypeSelection || noBaseSelection) {
+      appendEmpty("No filter options selected.");
+    } else {
+      appendEmpty(state.resultTotal === 0 ? "No updates found." : "No items on this page.");
+    }
     renderPagination();
     return;
   }
@@ -616,25 +681,30 @@ function renderResults() {
     const card = document.createElement("article");
     card.className = "cu-item";
     const localVersions = item.localVersions || [];
+    const newVersions = item.newVersions || [];
+    const hiddenVersions = state.showHidden ? (item.hiddenNewVersions || []) : [];
     const firstPath = localVersions.length ? localVersions[0].modelPath : "";
     const displayName = item.modelName ? escapeHtml(item.modelName) : escapeHtml(extractFilename(firstPath || "unknown"));
 
     const typePill = item.modelType ? `<span class="cu-type-pill" data-type="${escapeHtml(item.modelType)}">${escapeHtml(capitalize(item.modelType))}</span>` : "";
     const creatorHtml = item.creatorName ? `<span class="cu-creator">by ${escapeHtml(item.creatorName)}</span>` : "";
-
-    const latestDate = item.latestVersionDate ? shortDate(item.latestVersionDate) : "";
-    const latestNameHtml = item.versionUrl
-      ? `<a class="cu-ver-link" href="${escapeHtml(item.versionUrl)}" target="_blank" rel="noreferrer noopener">${escapeHtml(item.latestVersionName || "?")}</a>`
-      : `<span class="cu-ver-link">${escapeHtml(item.latestVersionName || "?")}</span>`;
-    const latestBasePill = item.latestBaseModel ? `<span class="cu-ver-tag">${escapeHtml(item.latestBaseModel)}</span>` : "";
-    const latestDatePill = latestDate ? `<span class="cu-ver-tag">${latestDate}</span>` : "";
+    const provisionalHtml = item.isProvisional ? `<span class="cu-provisional">Provisional</span>` : "";
 
     const localRows = localVersions.map((v) => {
       const date = v.publishedAt ? shortDate(v.publishedAt) : "";
-      const basePill = v.baseModel ? `<span class="cu-ver-tag">${escapeHtml(v.baseModel)}</span>` : "";
-      const datePill = date ? `<span class="cu-ver-tag">${date}</span>` : "";
-      return `<div class="cu-ver-row"><span class="cu-ver-label" data-role="saved">Saved</span>${datePill}${basePill}<span class="cu-ver-link cu-copy-path" data-path="${escapeHtml(v.modelPath || "")}" title="Click to copy file path">${escapeHtml(v.versionName || "?")}</span></div>`;
+      return `
+        <div class="cu-ver-row">
+          <span class="cu-ver-label" data-role="saved">Saved</span>
+          <span class="cu-ver-date">${escapeHtml(date || "—")}</span>
+          <span class="cu-ver-base">${escapeHtml(v.baseModel || "—")}</span>
+          <span class="cu-ver-main">
+            <span class="cu-ver-link cu-copy-path" data-path="${escapeHtml(v.modelPath || "")}" title="Click to copy file path">${escapeHtml(v.versionName || "?")}</span>
+          </span>
+        </div>`;
     }).join("");
+
+    const newRows = newVersions.map((v) => renderRemoteVersionRow(item.modelId, v, false)).join("");
+    const hiddenRows = hiddenVersions.map((v) => renderRemoteVersionRow(item.modelId, v, true)).join("");
 
     let thumbHtml;
     if (item.previewUrl && item.previewType === "video") {
@@ -649,13 +719,21 @@ function renderResults() {
       <div class="cu-thumb">${thumbHtml}</div>
       <div class="cu-item-body">
         <div class="cu-item-header">
-          <h4 title="${escapeHtml(firstPath)}">${displayName}</h4>
-          ${creatorHtml}
+          <div class="cu-ver-row cu-ver-row-model">
+            <span class="cu-ver-label cu-ver-label-model">${typePill || "<span></span>"}</span>
+            <span class="cu-ver-date"></span>
+            <span class="cu-ver-base"></span>
+            <div class="cu-ver-main">
+              <h4 title="${escapeHtml(firstPath)}">${displayName}</h4>
+              ${creatorHtml}
+              ${provisionalHtml}
+            </div>
+          </div>
         </div>
-        ${typePill ? `<div class="cu-pills">${typePill}</div>` : ""}
         <div class="cu-versions">
           ${localRows}
-          <div class="cu-ver-row"><span class="cu-ver-label" data-role="new">New</span>${latestDatePill}${latestBasePill}${latestNameHtml}</div>
+          ${newRows}
+          ${hiddenRows}
         </div>
       </div>`;
     for (const el of card.querySelectorAll(".cu-copy-path")) {
@@ -680,10 +758,112 @@ function renderResults() {
 
 function renderFilters() {
   if (!state.filterTypeEl || !state.filterBaseEl) return;
-  const prevType = state.filterType;
-  const prevBase = state.filterBase;
-  state.filterTypeEl.innerHTML = `<option value="">All types</option>` + state.facets.modelTypes.map((t) => `<option value="${escapeHtml(t)}"${t === prevType ? " selected" : ""}>${escapeHtml(capitalize(t))}</option>`).join("");
-  state.filterBaseEl.innerHTML = `<option value="">All bases</option>` + state.facets.baseModels.map((b) => `<option value="${escapeHtml(b)}"${b === prevBase ? " selected" : ""}>${escapeHtml(b)}</option>`).join("");
+  syncFacetSelection("filterTypes", "modelTypes");
+  syncFacetSelection("filterBases", "baseModels");
+  state.filterTypeEl.innerHTML = renderFilterMenu("type", "Types", state.facets.modelTypes, state.filterTypes, true);
+  state.filterBaseEl.innerHTML = renderFilterMenu("base", "Bases", state.facets.baseModels, state.filterBases, false);
+  if (state.showHiddenEl) state.showHiddenEl.checked = Boolean(state.showHidden);
+}
+
+function applyFacets(nextFacets) {
+  const previous = state.facets || { modelTypes: [], baseModels: [] };
+  const normalized = {
+    modelTypes: Array.isArray(nextFacets?.modelTypes) ? nextFacets.modelTypes : [],
+    baseModels: Array.isArray(nextFacets?.baseModels) ? nextFacets.baseModels : [],
+  };
+
+  carryAllSelectionForward("filterTypes", previous.modelTypes || [], normalized.modelTypes);
+  carryAllSelectionForward("filterBases", previous.baseModels || [], normalized.baseModels);
+  state.facets = normalized;
+}
+
+function carryAllSelectionForward(selectionKey, previousOptions, nextOptions) {
+  if (state[selectionKey] === null || !previousOptions.length || !nextOptions.length) return;
+
+  const selected = state[selectionKey] || [];
+  const hadAllPreviousOptions = previousOptions.every((value) => selected.includes(value));
+  if (hadAllPreviousOptions) {
+    state[selectionKey] = [...nextOptions];
+  }
+}
+
+function renderRemoteVersionRow(modelId, version, hidden) {
+  const date = version.versionDate ? shortDate(version.versionDate) : "—";
+  const name = escapeHtml(version.versionName || "?");
+  const link = version.versionUrl
+    ? `<a class="cu-ver-link" href="${escapeHtml(version.versionUrl)}" target="_blank" rel="noreferrer noopener">${name}</a>`
+    : `<span class="cu-ver-link">${name}</span>`;
+  const action = hidden
+    ? `<button class="cu-inline-btn" data-archive-action="restore" data-model-id="${escapeHtml(modelId || "")}" data-version-id="${escapeHtml(version.versionId || "")}">Unarchive</button>`
+    : `<button class="cu-inline-btn" data-archive-action="archive" data-model-id="${escapeHtml(modelId || "")}" data-version-id="${escapeHtml(version.versionId || "")}">Hide</button>`;
+  const hiddenClass = hidden ? " is-hidden" : "";
+  return `
+    <div class="cu-ver-row${hiddenClass}">
+      <span class="cu-ver-label" data-role="${hidden ? "hidden" : "new"}">${hidden ? "Hidden" : "New"}</span>
+      <span class="cu-ver-date">${escapeHtml(date)}</span>
+      <span class="cu-ver-base">${escapeHtml(version.baseModel || "—")}</span>
+      <span class="cu-ver-main">
+        ${link}
+        ${action}
+      </span>
+    </div>`;
+}
+
+function renderFilterMenu(kind, label, options, selected, capitalizeValues) {
+  const active = selected || [];
+  const summary = filterSummary(label, options, selected);
+  const entries = options.map((value) => {
+    const checked = active.includes(value) ? " checked" : "";
+    const title = capitalizeValues ? capitalize(value) : value;
+    return `<label class="cu-filter-option"><input type="checkbox" data-filter-kind="${kind}" data-filter-value="${escapeHtml(value)}"${checked}><span>${escapeHtml(title)}</span></label>`;
+  }).join("");
+  return `
+    <details class="cu-filter-menu">
+      <summary>${escapeHtml(summary)}</summary>
+      <div class="cu-filter-panel">
+        <div class="cu-filter-actions">
+          <button class="cu-text-btn" data-filter-action="all" data-filter-kind="${kind}" type="button">Select all</button>
+          <button class="cu-text-btn" data-filter-action="none" data-filter-kind="${kind}" type="button">Deselect all</button>
+        </div>
+        <div class="cu-filter-options">
+          ${entries || '<div class="cu-filter-empty">No options</div>'}
+        </div>
+      </div>
+    </details>`;
+}
+
+function filterSummary(label, options, selected) {
+  const active = selected || [];
+  if (!options.length) return `${label}: none`;
+  if (active.length === 0) return `${label}: none`;
+  if (active.length === options.length) return `${label}: all`;
+  if (active.length === 1) return `${label}: ${label === "Types" ? capitalize(active[0]) : active[0]}`;
+  return `${label}: ${active.length} selected`;
+}
+
+function syncFacetSelection(selectionKey, facetKey) {
+  const available = state.facets[facetKey] || [];
+  const current = state[selectionKey] || [];
+  if (!available.length) {
+    state[selectionKey] = null;
+    return;
+  }
+  if (state[selectionKey] === null) {
+    state[selectionKey] = [...available];
+    return;
+  }
+  const next = current.filter((value) => available.includes(value));
+  state[selectionKey] = current.length > 0 && next.length === 0 ? [...available] : next;
+}
+
+async function toggleArchivedUpdate(modelId, versionId, restore) {
+  const endpoint = restore ? "/civitai-updater/archived-updates/restore" : "/civitai-updater/archived-updates";
+  try {
+    await postJson(endpoint, { modelId, versionIds: [versionId] });
+    await loadResultPage(true);
+  } catch (error) {
+    setStatus(`Failed to update hidden versions: ${error.message}`);
+  }
 }
 
 function renderPagination() {
@@ -880,7 +1060,10 @@ function isTabVisible() {
 function openLightbox(item) {
   closeLightbox();
   const localVersions = item.localVersions || [];
-  const hasComparison = localVersions.some((v) => v.previewUrl) && item.previewUrl;
+  const visibleNewVersions = item.newVersions || [];
+  const hiddenNewVersions = item.hiddenNewVersions || [];
+  const primaryNewVersion = visibleNewVersions[0] || hiddenNewVersions[0] || null;
+  const hasComparison = localVersions.some((v) => v.previewUrl) && primaryNewVersion?.previewUrl;
 
   let sections = "";
   for (const v of localVersions) {
@@ -891,12 +1074,12 @@ function openLightbox(item) {
       : `<img src="${escapeHtml(v.previewUrl)}" alt="">`;
     sections += `<div class="cu-lb-card"><div class="cu-lb-label">Local</div><div class="cu-lb-vname">${escapeHtml(v.versionName || "?")}${base}</div>${media}</div>`;
   }
-  if (item.previewUrl) {
-    const latestBase = item.latestBaseModel ? ` <span class="cu-lb-base">${escapeHtml(item.latestBaseModel)}</span>` : "";
-    const media = item.previewType === "video"
-      ? `<video src="${escapeHtml(item.previewUrl)}" preload="auto" muted playsinline controls></video>`
-      : `<img src="${escapeHtml(item.previewUrl)}" alt="">`;
-    sections += `<div class="cu-lb-card"><div class="cu-lb-label">Latest</div><div class="cu-lb-vname">${escapeHtml(item.latestVersionName || "?")}${latestBase}</div>${media}</div>`;
+  if (primaryNewVersion?.previewUrl) {
+    const latestBase = primaryNewVersion.baseModel ? ` <span class="cu-lb-base">${escapeHtml(primaryNewVersion.baseModel)}</span>` : "";
+    const media = primaryNewVersion.previewType === "video"
+      ? `<video src="${escapeHtml(primaryNewVersion.previewUrl)}" preload="auto" muted playsinline controls></video>`
+      : `<img src="${escapeHtml(primaryNewVersion.previewUrl)}" alt="">`;
+    sections += `<div class="cu-lb-card"><div class="cu-lb-label">Newest Candidate</div><div class="cu-lb-vname">${escapeHtml(primaryNewVersion.versionName || "?")}${latestBase}</div>${media}</div>`;
   }
 
   const overlay = document.createElement("div");
@@ -1270,17 +1453,97 @@ function injectStyles() {
     .cu-filters {
       display: flex;
       gap: 6px;
+      flex-wrap: wrap;
       margin-bottom: 8px;
     }
 
-    .cu-filters select {
-      flex: 1;
+    .cu-filters select,
+    .cu-filter-menu > summary {
       border: 1px solid var(--cu-border);
       border-radius: 6px;
       padding: 4px 6px;
       background: rgba(255, 255, 255, 0.04);
       color: #c0cfea;
       font-size: 11px;
+    }
+
+    .cu-filter-slot {
+      flex: 1 1 140px;
+      min-width: 0;
+    }
+
+    .cu-filter-menu {
+      position: relative;
+    }
+
+    .cu-filter-menu > summary {
+      list-style: none;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .cu-filter-menu > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .cu-filter-panel {
+      position: absolute;
+      z-index: 5;
+      top: calc(100% + 4px);
+      left: 0;
+      min-width: 180px;
+      max-width: 260px;
+      border: 1px solid var(--cu-border);
+      border-radius: 8px;
+      background: #121926;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      padding: 8px;
+    }
+
+    .cu-filter-actions {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .cu-filter-options {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    .cu-filter-option {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #c0cfea;
+    }
+
+    .cu-filter-empty {
+      font-size: 10.5px;
+      color: #6e7e99;
+      font-style: italic;
+    }
+
+    .cu-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 6px;
+      border: 1px solid var(--cu-border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      font-size: 11px;
+      color: #c0cfea;
+      cursor: pointer;
+      white-space: nowrap;
     }
 
     .cu-results {
@@ -1358,9 +1621,6 @@ function injectStyles() {
     }
 
     .cu-item-header {
-      display: flex;
-      align-items: center;
-      gap: 6px;
       margin-bottom: 3px;
     }
 
@@ -1373,13 +1633,6 @@ function injectStyles() {
       overflow: hidden;
       text-overflow: ellipsis;
       min-width: 0;
-    }
-
-    .cu-pills {
-      display: flex;
-      gap: 4px;
-      flex-wrap: wrap;
-      margin-bottom: 4px;
     }
 
     .cu-type-pill {
@@ -1409,7 +1662,8 @@ function injectStyles() {
     }
 
     .cu-ver-row {
-      display: flex;
+      display: grid;
+      grid-template-columns: 54px 58px 84px minmax(0, 1fr);
       align-items: center;
       gap: 6px;
     }
@@ -1427,6 +1681,13 @@ function injectStyles() {
       text-align: center;
     }
 
+    .cu-ver-label-model {
+      padding: 0;
+      background: transparent;
+      border: 0;
+      min-width: 0;
+    }
+
     .cu-ver-label[data-role="saved"] {
       color: #8d9bb5;
       background: rgba(141, 155, 181, 0.1);
@@ -1439,6 +1700,33 @@ function injectStyles() {
       border: 1px solid rgba(126, 176, 255, 0.2);
     }
 
+    .cu-ver-label[data-role="hidden"] {
+      color: #c5a76b;
+      background: rgba(197, 167, 107, 0.12);
+      border: 1px solid rgba(197, 167, 107, 0.2);
+    }
+
+    .cu-ver-date,
+    .cu-ver-base {
+      font-size: 10px;
+      color: #7a8aa5;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .cu-ver-main {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      overflow: hidden;
+    }
+
+    .cu-ver-main h4 {
+      flex: 1 1 auto;
+    }
+
     .cu-ver-link {
       color: var(--cu-accent-2);
       cursor: pointer;
@@ -1448,22 +1736,12 @@ function injectStyles() {
       text-overflow: ellipsis;
       white-space: nowrap;
       min-width: 0;
+      flex: 1 1 auto;
     }
 
     .cu-ver-link:hover {
       color: #a0d8ff;
       text-decoration: underline;
-    }
-
-    .cu-ver-tag {
-      font-size: 9px;
-      padding: 1px 5px;
-      border-radius: 3px;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      color: #6e7e99;
-      white-space: nowrap;
-      flex-shrink: 0;
     }
 
     .cu-creator {
@@ -1472,6 +1750,36 @@ function injectStyles() {
       font-weight: 400;
       white-space: nowrap;
       flex-shrink: 0;
+    }
+
+    .cu-provisional {
+      font-size: 9px;
+      color: #f0be62;
+      border: 1px solid rgba(240, 190, 98, 0.2);
+      border-radius: 999px;
+      padding: 1px 6px;
+      white-space: nowrap;
+    }
+
+    .cu-inline-btn {
+      border: 1px solid var(--cu-border);
+      background: rgba(255, 255, 255, 0.04);
+      color: #c0cfea;
+      border-radius: 999px;
+      font-size: 10px;
+      padding: 1px 7px;
+      cursor: pointer;
+      white-space: nowrap;
+      flex: 0 0 auto;
+    }
+
+    .cu-inline-btn:hover {
+      border-color: #4fb4ff;
+      color: #dce5f5;
+    }
+
+    .cu-ver-row.is-hidden {
+      opacity: 0.72;
     }
 
     /* ---- Pagination ---- */
@@ -1634,6 +1942,21 @@ function injectStyles() {
       .cu-thumb {
         width: 100%;
         height: 120px;
+      }
+
+      .cu-ver-row {
+        grid-template-columns: 54px 1fr;
+      }
+
+      .cu-ver-date,
+      .cu-ver-base {
+        display: none;
+      }
+
+      .cu-filter-slot,
+      .cu-filters select,
+      .cu-toggle {
+        flex-basis: 100%;
       }
     }
 

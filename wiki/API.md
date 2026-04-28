@@ -78,6 +78,9 @@ Query params:
 - `offset`: integer, default `0`
 - `limit`: integer, default `25`
 - `mode`: optional, supports `updates`
+- `showHidden`: optional `0|1`
+- `modelType`: optional repeated parameter for multi-select filtering
+- `baseModel`: optional repeated parameter for multi-select filtering
 
 Response fields:
 
@@ -86,7 +89,28 @@ Response fields:
 - `offset`
 - `limit`
 - `mode`
+- `facets`
 - `items`
+
+Grouped items now include:
+
+- `localVersions`
+- `newVersions`
+- `hiddenNewVersions`
+- `isProvisional`
+
+## `POST /civitai-updater/archived-updates`
+
+Persistently hides one or more remote version IDs for a model.
+
+Request body:
+
+- `modelId`: string
+- `versionIds`: string array
+
+## `POST /civitai-updater/archived-updates/restore`
+
+Removes previously hidden remote version IDs for a model.
 
 ## `POST /civitai-updater/jobs/{job_id}/pause`
 
