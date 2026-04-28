@@ -6,6 +6,8 @@ import threading
 import time
 import uuid
 
+from .constants import MODEL_PAGE_BASE_URL
+
 
 @dataclass
 class JobRecord:
@@ -127,7 +129,7 @@ class JobManager:
 
     def load_cached_check(self, cache_data: dict) -> JobRecord:
         """Load previously cached check results into a virtual job record."""
-        items = cache_data.get("items", [])
+        items = [_normalize_cached_item_urls(item) for item in cache_data.get("items", []) or []]
         summary = cache_data.get("summary", {})
         checked_at = cache_data.get("checkedAt", "")
 
@@ -231,6 +233,38 @@ class JobManager:
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+def _normalize_cached_item_urls(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return item
+
+    normalized = dict(item)
+    for key in ("modelUrl", "versionUrl"):
+        normalized[key] = _normalize_civitai_model_page_url(normalized.get(key, ""))
+
+    remote_versions = []
+    for version in normalized.get("remoteVersions", []) or []:
+        if not isinstance(version, dict):
+            remote_versions.append(version)
+            continue
+        version_copy = dict(version)
+        version_copy["versionUrl"] = _normalize_civitai_model_page_url(version_copy.get("versionUrl", ""))
+        remote_versions.append(version_copy)
+    normalized["remoteVersions"] = remote_versions
+    return normalized
+
+
+def _normalize_civitai_model_page_url(url: str) -> str:
+    if not isinstance(url, str) or not url:
+        return ""
+
+    legacy_bases = (
+        "https://civitai.com/models",
+        "http://civitai.com/models",
+    )
+    for legacy_base in legacy_bases:
+        if url.startswith(legacy_base):
+            return f"{MODEL_PAGE_BASE_URL}{url[len(legacy_base):]}"
+    return url
 
 def _group_items_by_model(items: list[dict]) -> list[dict]:
     """Group raw items by modelId (or modelUrl as fallback for older data)."""

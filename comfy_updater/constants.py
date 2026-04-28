@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 API_BASE_URL = "https://civitai.com/api/v1"
-MODEL_PAGE_BASE_URL = "https://civitai.com/models"
+MODEL_PAGE_BASE_URL = "https://civitai.red/models"
 
 VERSION_BY_HASH_URL = f"{API_BASE_URL}/model-versions/by-hash"
 MODEL_BY_ID_URL = f"{API_BASE_URL}/models"
