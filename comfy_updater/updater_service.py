@@ -77,6 +77,7 @@ class UpdaterService:
             api_key=config.get("apiKey", ""),
             timeout_seconds=int(config.get("requestTimeoutSeconds", 30)),
             max_retries=int(config.get("maxRetries", 4)),
+            civitai_domain=config.get("civitaiDomain", "civitai.com"),
         )
 
         stats = {

@@ -44,10 +44,11 @@ class JobRecord:
 
 
 class JobManager:
-    def __init__(self, archive_store=None) -> None:
+    def __init__(self, archive_store=None, config_store=None) -> None:
         self._jobs: dict[str, JobRecord] = {}
         self._lock = threading.Lock()
         self.archive_store = archive_store
+        self.config_store = config_store
 
     def start(self, job_type: str, runner) -> JobRecord:
         job_id = str(uuid.uuid4())
@@ -150,7 +151,12 @@ class JobManager:
         return None
 
     def load_cached_check(self, cache_data: dict) -> JobRecord:
-        items = [_normalize_cached_item_urls(item) for item in cache_data.get("items", []) or []]
+        domain = "civitai.com"
+        if self.config_store:
+            config = self.config_store.get()
+            domain = config.get("civitaiDomain", "civitai.com")
+
+        items = [_normalize_cached_item_urls(item, domain) for item in cache_data.get("items", []) or []]
         summary = cache_data.get("summary", {})
         checked_at = cache_data.get("checkedAt", "")
 
@@ -255,13 +261,13 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _normalize_cached_item_urls(item: dict) -> dict:
+def _normalize_cached_item_urls(item: dict, civitai_domain: str = "civitai.com") -> dict:
     if not isinstance(item, dict):
         return item
 
     normalized = dict(item)
     for key in ("modelUrl", "versionUrl"):
-        normalized[key] = _normalize_civitai_model_page_url(normalized.get(key, ""))
+        normalized[key] = _normalize_civitai_model_page_url(normalized.get(key, ""), civitai_domain)
 
     remote_versions = []
     for version in normalized.get("remoteVersions", []) or []:
@@ -269,23 +275,25 @@ def _normalize_cached_item_urls(item: dict) -> dict:
             remote_versions.append(version)
             continue
         version_copy = dict(version)
-        version_copy["versionUrl"] = _normalize_civitai_model_page_url(version_copy.get("versionUrl", ""))
+        version_copy["versionUrl"] = _normalize_civitai_model_page_url(version_copy.get("versionUrl", ""), civitai_domain)
         remote_versions.append(version_copy)
     normalized["remoteVersions"] = remote_versions
     return normalized
 
 
-def _normalize_civitai_model_page_url(url: str) -> str:
+def _normalize_civitai_model_page_url(url: str, civitai_domain: str = "civitai.com") -> str:
     if not isinstance(url, str) or not url:
         return ""
 
     legacy_bases = (
         "https://civitai.com/models",
         "http://civitai.com/models",
+        "https://civitai.red/models",
+        "http://civitai.red/models",
     )
     for legacy_base in legacy_bases:
         if url.startswith(legacy_base):
-            return f"{MODEL_PAGE_BASE_URL}{url[len(legacy_base):]}"
+            return f"https://{civitai_domain}/models{url[len(legacy_base):]}"
     return url
 
 

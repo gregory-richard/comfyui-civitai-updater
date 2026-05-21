@@ -22,7 +22,7 @@ def initialize_plugin() -> None:
     config_store = ConfigStore(data_dir)
     archive_store = ArchivedUpdateStore(data_dir)
     updater_service = UpdaterService(config_store)
-    job_manager = JobManager(archive_store)
+    job_manager = JobManager(archive_store, config_store)
     register_routes(config_store, updater_service, job_manager, archive_store)
 
     _INITIALIZED = True

@@ -9,6 +9,7 @@ from .constants import SUPPORTED_MODEL_TYPES
 
 DEFAULT_CONFIG = {
     "apiKey": "",
+    "civitaiDomain": "civitai.com",
     "cacheTtlMinutes": 240,
     "requestTimeoutSeconds": 30,
     "maxRetries": 4,
@@ -49,6 +50,7 @@ class ConfigStore:
 
         for key in (
             "apiKey",
+            "civitaiDomain",
             "cacheTtlMinutes",
             "requestTimeoutSeconds",
             "maxRetries",
@@ -86,6 +88,10 @@ class ConfigStore:
 
         if not isinstance(merged["apiKey"], str):
             merged["apiKey"] = ""
+        if not isinstance(merged["civitaiDomain"], str) or merged["civitaiDomain"].strip().lower() not in ("civitai.com", "civitai.red"):
+            merged["civitaiDomain"] = "civitai.com"
+        else:
+            merged["civitaiDomain"] = merged["civitaiDomain"].strip().lower()
         merged["useComfyPaths"] = bool(merged["useComfyPaths"])
         merged["useExtraModelPaths"] = bool(merged["useExtraModelPaths"])
         merged["useCustomPaths"] = bool(merged["useCustomPaths"])

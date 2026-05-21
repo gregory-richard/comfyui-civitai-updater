@@ -12,8 +12,17 @@ class CivitaiClientUrlTests(unittest.TestCase):
         self.assertEqual("https://civitai.com/api/v1/models", MODEL_BY_ID_URL)
         self.assertEqual("https://civitai.com/api/v1/model-versions", MODEL_VERSION_BY_ID_URL)
 
-    def test_page_urls_use_civitai_red_full_catalog_front_door(self) -> None:
+    def test_page_urls_use_default_civitai_com(self) -> None:
         client = CivitaiClient(api_key="", timeout_seconds=30, max_retries=0)
+
+        self.assertEqual("https://civitai.com/models/6424", client.model_page_url(6424))
+        self.assertEqual(
+            "https://civitai.com/models/6424?modelVersionId=11745",
+            client.version_page_url(6424, 11745),
+        )
+
+    def test_page_urls_can_use_configured_civitai_red(self) -> None:
+        client = CivitaiClient(api_key="", timeout_seconds=30, max_retries=0, civitai_domain="civitai.red")
 
         self.assertEqual("https://civitai.red/models/6424", client.model_page_url(6424))
         self.assertEqual(

@@ -12,6 +12,7 @@ const POLL_MS = 800;
 
 const SETTINGS = {
   apiKey: "CivitaiUpdater.APIKey",
+  civitaiDomain: "CivitaiUpdater.CivitaiDomain",
   cacheTtlMinutes: "CivitaiUpdater.CacheTtlMinutes",
   requestTimeoutSeconds: "CivitaiUpdater.RequestTimeoutSeconds",
   maxRetries: "CivitaiUpdater.MaxRetries",
@@ -88,6 +89,7 @@ app.registerExtension({
   name: EXTENSION_NAME,
   settings: [
     { id: SETTINGS.apiKey, name: "API Key", type: "text", defaultValue: "", attrs: { type: "password", autocomplete: "off" }, tooltip: "Optional Civitai API key for restricted resources.", category: ["Civitai Updater", "Network", "API Key"], onChange: () => scheduleSettingsSync() },
+    { id: SETTINGS.civitaiDomain, name: "Civitai Domain", type: "combo", defaultValue: "civitai.com", options: ["civitai.com", "civitai.red"], tooltip: "Preferred Civitai domain/mirror for page links.", category: ["Civitai Updater", "General", "Civitai Domain"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.cacheTtlMinutes, name: "Cache Duration (minutes)", type: "number", defaultValue: 240, attrs: { min: 0, max: 10080, step: 30 }, tooltip: "How long to reuse cached check results before re-checking. 0 = always check fresh.", category: ["Civitai Updater", "General", "Cache Duration"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.requestTimeoutSeconds, name: "Request Timeout (seconds)", type: "number", defaultValue: 30, attrs: { min: 5, max: 300, step: 1 }, category: ["Civitai Updater", "Network", "Request Timeout"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.maxRetries, name: "Max Retries", type: "number", defaultValue: 4, attrs: { min: 0, max: 10, step: 1 }, category: ["Civitai Updater", "Network", "Max Retries"], onChange: () => scheduleSettingsSync() },
@@ -132,9 +134,17 @@ async function renderTab(el) {
           <div class="cu-label">Model Scope</div>
           <div class="cu-row">${MODEL_TYPES.map((t) => `<label class="cu-chip" title="Include ${t} in jobs"><input type="checkbox" data-type="${t}" checked><span>${t.charAt(0).toUpperCase() + t.slice(1)}</span></label>`).join("")}</div>
           <div class="cu-label">Options</div>
-          <label class="cu-option" title="Re-identify every model by recomputing its SHA256 hash, even if cached metadata exists. Use this after manually replacing model files — the cache won't know the file changed otherwise."><input id="cu-rehash" type="checkbox"><span>Force rehash</span></label>
+          <label class="cu-option">
+            <input id="cu-rehash" type="checkbox">
+            <span>Force rehash</span>
+            <span class="cu-info-trigger cu-tooltip" data-tooltip="Re-identify every model by recomputing its SHA256 hash. Use this after manually replacing model files — the cache won't know the file changed otherwise.">ⓘ</span>
+          </label>
           <p class="cu-option-hint">Re-identify models from scratch. Use after replacing files.</p>
-          <label class="cu-option" title="During metadata scans, re-fetch info from Civitai for models that already have a .civitai.info file. Uses sidecar version IDs for speed; enable Force rehash if files were manually replaced."><input id="cu-refetch" type="checkbox"><span>Refetch existing metadata during scans</span></label>
+          <label class="cu-option">
+            <input id="cu-refetch" type="checkbox">
+            <span>Refetch existing metadata during scans</span>
+            <span class="cu-info-trigger cu-tooltip" data-tooltip="During metadata scans, re-fetch info from Civitai for models that already have a .civitai.info file. Uses sidecar version IDs for speed.">ⓘ</span>
+          </label>
           <div class="cu-divider"></div>
           <div class="cu-head">
             <div class="cu-label">Resolved Roots</div>
@@ -148,8 +158,8 @@ async function renderTab(el) {
 
     <section class="cu-card">
       <div class="cu-action-bar">
-        <button id="cu-check" class="cu-btn cu-btn-primary" title="Scan files and compare local versions with latest Civitai releases">Scan + Check Updates</button>
-        <button id="cu-scan" class="cu-btn cu-btn-outline" title="Scan files and refresh sidecar metadata only (no update comparison).">Scan Only (Metadata)</button>
+        <button id="cu-check" class="cu-btn cu-btn-primary cu-tooltip" data-tooltip="Scan local files and compare with Civitai to check for newer versions.">Check for Updates</button>
+        <button id="cu-scan" class="cu-btn cu-btn-outline cu-tooltip" data-tooltip="Scan files and download/refresh sidecar metadata only (no update comparison).">Scan Metadata Only</button>
       </div>
       <div id="cu-cache-info" class="cu-cache-info"></div>
       <div id="cu-progress-wrap" class="cu-progress-wrap" style="display:none">
@@ -169,7 +179,7 @@ async function renderTab(el) {
         <select id="cu-size" title="Results per page">${PAGE_SIZES.map((v) => `<option value="${v}">${v}</option>`).join("")}</select>
       </div>
       <div id="cu-scan-report" class="cu-scan-report"></div>
-      <div id="cu-check-summary" class="cu-summary">No scan+check has run yet.</div>
+      <div id="cu-check-summary" class="cu-summary">No update check has run yet.</div>
       <div class="cu-filters">
         <div id="cu-filter-type" class="cu-filter-slot"></div>
         <div id="cu-filter-base" class="cu-filter-slot"></div>
@@ -233,7 +243,7 @@ async function loadCachedResults() {
     const resp = await getJson("/civitai-updater/last-check");
     if (!resp.data) {
       if (resp.cacheInvalid) {
-        setStatus("Cached results are from an older format. Run Scan + Check Updates again.");
+        setStatus("Cached results are from an older format. Run Check for Updates again.");
       }
       return;
     }
@@ -256,7 +266,7 @@ async function loadCachedResults() {
         pollJob(activeResp.job.jobId);
         return;
       }
-      setStatus("Previous check was interrupted. Run Scan + Check Updates again.");
+      setStatus("Previous check was interrupted. Run Check for Updates again.");
       return;
     }
 
@@ -446,9 +456,11 @@ async function stopCurrentJob() {
 
 function pollJob(jobId) {
   if (state.pollTimer) clearInterval(state.pollTimer);
+  let consecutiveFailures = 0;
   state.pollTimer = setInterval(async () => {
     try {
       const job = await getJson(`/civitai-updater/jobs/${jobId}`);
+      consecutiveFailures = 0;
       const status = job.status || "running";
       const progress = Number(job.progress || 0);
       const total = Number(job.total || 0);
@@ -475,7 +487,7 @@ function pollJob(jobId) {
 
       if (state.currentJobType === "scan" && job.summary && Object.keys(job.summary).length > 0) {
         state.scanSummary = job.summary;
-        state.scanHint = "Run Scan + Check Updates to see available updates.";
+        state.scanHint = "Run Check for Updates to see available updates.";
         renderScanReport();
       }
 
@@ -491,7 +503,7 @@ function pollJob(jobId) {
         }
         if (state.currentJobType === "scan") {
           if (job.summary && Object.keys(job.summary).length > 0) state.scanSummary = job.summary;
-          state.scanHint = "Run Scan + Check Updates to see available updates.";
+          state.scanHint = "Run Check for Updates to see available updates.";
           renderScanReport();
           renderResults();
         }
@@ -521,6 +533,11 @@ function pollJob(jobId) {
         updateControlButtons();
       }
     } catch (error) {
+      consecutiveFailures++;
+      if (consecutiveFailures < 5) {
+        setStatus(`Reconnecting... (Attempt ${consecutiveFailures}/5)`);
+        return;
+      }
       clearInterval(state.pollTimer);
       state.pollTimer = null;
       state.currentJobId = null;
@@ -611,24 +628,25 @@ function renderCacheInfo() {
   const fresh = ttl > 0 && age < ttl * 60 * 1000;
   const dirty = state.cacheFilesChanged;
 
-  let dot, label;
+  let statusPill = "";
+  let detailsText = "";
   if (dirty) {
     const parts = [];
     if (dirty.added) parts.push(`${dirty.added} added`);
     if (dirty.removed) parts.push(`${dirty.removed} removed`);
-    dot = `<span class="cu-cache-stale">\u25cf</span>`;
-    label = `models changed (${parts.join(", ")}) \u2014 re-check recommended`;
+    const details = parts.join(", ");
+    const tooltipText = `Models changed on your disk (${details}). Re-check is recommended to sync changes.`;
+    statusPill = `<span class="cu-status-pill cu-tooltip" data-status="dirty" data-tooltip="${escapeHtml(tooltipText)}">changes detected</span>`;
+    detailsText = ` <span class="cu-dirty-details">(${escapeHtml(details)})</span>`;
   } else if (fresh) {
-    dot = `<span class="cu-cache-fresh">\u25cf</span>`;
-    label = "cached";
+    statusPill = `<span class="cu-status-pill cu-tooltip" data-status="cached" data-tooltip="Results are fresh and cached. Will remain cached for up to ${ttl} minutes since last check.">cached</span>`;
   } else {
-    dot = `<span class="cu-cache-stale">\u25cf</span>`;
-    label = "stale";
+    statusPill = `<span class="cu-status-pill cu-tooltip" data-status="stale" data-tooltip="Cache duration has expired. Click 'Check for Updates' to fetch fresh updates from Civitai.">stale</span>`;
   }
 
   const showRefresh = fresh && !dirty;
-  const refreshPart = showRefresh ? ` \u00b7 <button id="cu-force-recheck" class="cu-text-btn">Refresh</button>` : "";
-  state.cacheInfoEl.innerHTML = `${dot} Last checked ${timeAgo(state.cachedAt)} \u00b7 ${label}${refreshPart}`;
+  const refreshPart = showRefresh ? ` · <button id="cu-force-recheck" class="cu-text-btn">Refresh</button>` : "";
+  state.cacheInfoEl.innerHTML = `Last checked ${timeAgo(state.cachedAt)} · ${statusPill}${detailsText}${refreshPart}`;
   state.cacheInfoEl.style.display = "";
   const refreshEl = state.cacheInfoEl.querySelector("#cu-force-recheck");
   if (refreshEl) {
@@ -658,11 +676,11 @@ function renderResults() {
     const hidden = s.hiddenUpdates ? ` \u00b7 ${s.hiddenUpdates} hidden` : "";
     state.checkSummaryEl.textContent = `${s.total || 0} checked \u00b7 ${s.withUpdates || 0} updates${hidden} \u00b7 ${s.notFound || 0} not found \u00b7 ${s.errors || 0} errors`;
   } else {
-    state.checkSummaryEl.textContent = "No scan+check has run yet.";
+    state.checkSummaryEl.textContent = "No update check has run yet.";
   }
   state.resultsEl.innerHTML = "";
   if (!state.checkJobId) {
-    appendEmpty("Run Scan + Check Updates to see results.");
+    appendEmpty("Run Check for Updates to see results.");
     renderPagination();
     return;
   }
@@ -950,6 +968,12 @@ async function hydrateSettingsFromBackend() {
     const data = await getJson("/civitai-updater/config");
     const cfg = data.config || {};
     state.suspendSettingsSync = true;
+    if (cfg.hasApiKey) {
+      setSetting(SETTINGS.apiKey, "***HIDDEN***");
+    } else {
+      setSetting(SETTINGS.apiKey, "");
+    }
+    setSetting(SETTINGS.civitaiDomain, cfg.civitaiDomain ?? "civitai.com");
     setSetting(SETTINGS.cacheTtlMinutes, Number(cfg.cacheTtlMinutes ?? 240));
     setSetting(SETTINGS.requestTimeoutSeconds, Number(cfg.requestTimeoutSeconds ?? 30));
     setSetting(SETTINGS.maxRetries, Number(cfg.maxRetries ?? 4));
@@ -977,8 +1001,9 @@ function scheduleSettingsSync(immediate = false) {
 }
 
 async function syncSettingsToBackend() {
+  const apiKeyVal = String(getSetting(SETTINGS.apiKey, "") || "");
   const payload = {
-    apiKey: String(getSetting(SETTINGS.apiKey, "") || ""),
+    civitaiDomain: String(getSetting(SETTINGS.civitaiDomain, "civitai.com")),
     cacheTtlMinutes: Number(getSetting(SETTINGS.cacheTtlMinutes, 240)),
     requestTimeoutSeconds: Number(getSetting(SETTINGS.requestTimeoutSeconds, 30)),
     maxRetries: Number(getSetting(SETTINGS.maxRetries, 4)),
@@ -993,6 +1018,9 @@ async function syncSettingsToBackend() {
       unet: parsePathSetting(getSetting(SETTINGS.customUnet, "")),
     },
   };
+  if (apiKeyVal !== "***HIDDEN***") {
+    payload.apiKey = apiKeyVal;
+  }
   try {
     const data = await postJson("/civitai-updater/config", payload);
     state.roots = data.effectiveRoots || state.roots;
@@ -1155,10 +1183,10 @@ function injectStyles() {
     .cu-root {
       --cu-bg-0: #0f1218;
       --cu-bg-1: #151c2a;
-      --cu-card: #182033;
+      --cu-card: rgba(24, 32, 51, 0.65);
       --cu-text: #e4eaf5;
       --cu-muted: #8d9bb5;
-      --cu-border: #263048;
+      --cu-border: rgba(255, 255, 255, 0.08);
       --cu-accent: #1ccf98;
       --cu-accent-2: #4fb4ff;
       --cu-danger: #ff6f7d;
@@ -1180,7 +1208,10 @@ function injectStyles() {
       padding: 14px 12px 12px;
       border-radius: 12px;
       border: 1px solid var(--cu-border);
-      background: linear-gradient(135deg, rgba(28, 207, 152, 0.08) 0%, var(--cu-card) 60%);
+      background: linear-gradient(135deg, rgba(28, 207, 152, 0.12) 0%, rgba(24, 32, 51, 0.7) 60%);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
     }
 
     .cu-hero-title {
@@ -1204,6 +1235,15 @@ function injectStyles() {
       border-radius: 12px;
       padding: 12px;
       background: var(--cu-card);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .cu-card:hover {
+      border-color: rgba(79, 180, 255, 0.25);
+      box-shadow: 0 6px 24px rgba(79, 180, 255, 0.06);
     }
 
     .cu-card > h3,
@@ -1292,12 +1332,17 @@ function injectStyles() {
       font-size: 12px;
       font-weight: 600;
       line-height: 1.3;
-      transition: border-color 100ms, background 100ms;
+      transition: border-color 0.2s ease, background 0.2s ease, transform 0.1s ease, box-shadow 0.2s ease;
     }
 
     .cu-btn:hover {
-      border-color: #3d5478;
-      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(79, 180, 255, 0.4);
+      background: rgba(255, 255, 255, 0.08);
+      box-shadow: 0 0 8px rgba(79, 180, 255, 0.15);
+    }
+
+    .cu-btn:active {
+      transform: scale(0.97);
     }
 
     .cu-btn:disabled {
@@ -1311,22 +1356,39 @@ function injectStyles() {
       color: #072016;
       background: linear-gradient(135deg, var(--cu-accent), #1ab583);
       font-weight: 700;
+      box-shadow: 0 2px 8px rgba(28, 207, 152, 0.25);
+      transition: filter 0.2s, transform 0.1s, box-shadow 0.2s;
     }
 
     .cu-btn-primary:hover {
       filter: brightness(1.1);
+      box-shadow: 0 4px 12px rgba(28, 207, 152, 0.45);
     }
 
     .cu-btn-secondary {
       color: #8dd4f5;
       border-color: rgba(79, 180, 255, 0.3);
       background: rgba(79, 180, 255, 0.1);
+      transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, transform 0.1s;
+    }
+
+    .cu-btn-secondary:hover {
+      background: rgba(79, 180, 255, 0.18);
+      border-color: rgba(79, 180, 255, 0.5);
+      box-shadow: 0 0 10px rgba(79, 180, 255, 0.2);
     }
 
     .cu-btn-danger {
       color: #ff9ca6;
       border-color: rgba(255, 111, 125, 0.3);
       background: rgba(255, 111, 125, 0.08);
+      transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, transform 0.1s;
+    }
+
+    .cu-btn-danger:hover {
+      background: rgba(255, 111, 125, 0.15);
+      border-color: rgba(255, 111, 125, 0.5);
+      box-shadow: 0 0 10px rgba(255, 111, 125, 0.15);
     }
 
     .cu-btn-outline {
@@ -1350,9 +1412,11 @@ function injectStyles() {
       font-size: 11px;
       font-weight: 600;
       padding: 2px 0;
+      transition: color 0.15s ease;
     }
 
     .cu-text-btn:hover {
+      color: #a0d8ff;
       text-decoration: underline;
     }
 
@@ -1401,19 +1465,108 @@ function injectStyles() {
     /* ---- Cache info ---- */
 
     .cu-cache-info {
+      font-size: 11.5px;
+      color: var(--cu-muted);
+      margin-bottom: 6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .cu-status-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 9.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 4px;
+      line-height: 1;
+      border: 1px solid;
+    }
+
+    .cu-status-pill[data-status="cached"] {
+      color: var(--cu-accent);
+      border-color: rgba(28, 207, 152, 0.3);
+      background: rgba(28, 207, 152, 0.08);
+    }
+
+    .cu-status-pill[data-status="stale"] {
+      color: var(--cu-warn);
+      border-color: rgba(243, 166, 56, 0.3);
+      background: rgba(243, 166, 56, 0.08);
+    }
+
+    .cu-status-pill[data-status="dirty"] {
+      color: var(--cu-danger);
+      border-color: rgba(255, 111, 125, 0.3);
+      background: rgba(255, 111, 125, 0.08);
+    }
+
+    .cu-dirty-details {
       font-size: 11px;
       color: var(--cu-muted);
-      margin-bottom: 4px;
     }
 
-    .cu-cache-fresh {
-      color: var(--cu-accent);
-      font-size: 9px;
+    /* ---- Tooltips ---- */
+
+    .cu-tooltip {
+      position: relative;
     }
 
-    .cu-cache-stale {
-      color: var(--cu-warn);
+    .cu-tooltip::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: 130%;
+      left: 50%;
+      transform: translateX(-50%) scale(0.95);
+      background: rgba(12, 18, 30, 0.98);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #e4eaf5;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 500;
+      white-space: normal;
+      width: max-content;
+      max-width: 220px;
+      z-index: 99999;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      line-height: 1.35;
+      text-transform: none;
+      text-align: center;
+    }
+
+    .cu-tooltip:hover::after {
+      opacity: 1;
+      transform: translateX(-50%) scale(1);
+    }
+
+    .cu-info-trigger {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--cu-muted);
       font-size: 9px;
+      font-weight: bold;
+      cursor: help;
+      margin-left: 6px;
+      vertical-align: middle;
+      transition: background 0.2s ease, color 0.2s ease;
+    }
+
+    .cu-info-trigger:hover {
+      background: rgba(79, 180, 255, 0.25);
+      color: var(--cu-accent-2);
     }
 
     /* ---- Status ---- */
@@ -1496,11 +1649,20 @@ function injectStyles() {
       left: 0;
       min-width: 180px;
       max-width: 260px;
-      border: 1px solid var(--cu-border);
+      border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 8px;
-      background: #121926;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      background: rgba(18, 25, 38, 0.92);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
       padding: 8px;
+      transform-origin: top left;
+      animation: cu-fade-in 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes cu-fade-in {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
     }
 
     .cu-filter-actions {
@@ -1544,6 +1706,12 @@ function injectStyles() {
       color: #c0cfea;
       cursor: pointer;
       white-space: nowrap;
+      transition: all 0.15s ease;
+    }
+
+    .cu-toggle:hover {
+      border-color: rgba(79, 180, 255, 0.3);
+      background: rgba(255, 255, 255, 0.08);
     }
 
     .cu-results {
@@ -1565,10 +1733,17 @@ function injectStyles() {
       display: grid;
       grid-template-columns: 56px 1fr;
       gap: 10px;
-      border: 1px solid var(--cu-border);
+      border: 1px solid rgba(255, 255, 255, 0.05);
       border-radius: 10px;
       padding: 8px;
       background: rgba(255, 255, 255, 0.02);
+      transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+    }
+
+    .cu-item:hover {
+      border-color: rgba(28, 207, 152, 0.2);
+      background: rgba(255, 255, 255, 0.04);
+      transform: translateY(-1px);
     }
 
     .cu-thumb {
@@ -1603,6 +1778,12 @@ function injectStyles() {
       height: 100%;
       object-fit: cover;
       display: block;
+      transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+    }
+
+    .cu-thumb:hover img,
+    .cu-thumb:hover video {
+      transform: scale(1.12);
     }
 
     .cu-thumb-empty {
@@ -1771,11 +1952,14 @@ function injectStyles() {
       cursor: pointer;
       white-space: nowrap;
       flex: 0 0 auto;
+      transition: all 0.15s ease;
     }
 
     .cu-inline-btn:hover {
       border-color: #4fb4ff;
       color: #dce5f5;
+      background: rgba(79, 180, 255, 0.1);
+      transform: translateY(-0.5px);
     }
 
     .cu-ver-row.is-hidden {
@@ -1807,11 +1991,12 @@ function injectStyles() {
       justify-content: center;
       padding: 0;
       line-height: 1;
-      transition: border-color 100ms;
+      transition: border-color 0.2s ease, background-color 0.2s ease;
     }
 
     .cu-page-btn:hover {
-      border-color: #3d5478;
+      border-color: rgba(79, 180, 255, 0.4);
+      background: rgba(255, 255, 255, 0.08);
     }
 
     .cu-page-btn:disabled {
@@ -1839,6 +2024,12 @@ function injectStyles() {
       color: #b0c4e0;
       font-size: 11px;
       cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .cu-chip:hover {
+      border-color: #4fb4ff;
+      background: rgba(79, 180, 255, 0.1);
     }
 
     .cu-option {
@@ -1870,6 +2061,11 @@ function injectStyles() {
       font-weight: 700;
       list-style: none;
       user-select: none;
+      transition: color 0.15s ease;
+    }
+
+    .cu-settings > summary:hover {
+      color: #e4eaf5;
     }
 
     .cu-settings > summary::-webkit-details-marker {
@@ -1985,8 +2181,8 @@ function injectStyles() {
 
     .cu-lb-container {
       position: relative;
-      background: #1a2235;
-      border: 1px solid #2a3d58;
+      background: rgba(26, 34, 53, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 14px;
       max-width: 92vw;
       max-height: 92vh;
@@ -1995,6 +2191,8 @@ function injectStyles() {
       flex-direction: column;
       font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
       box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
     }
 
     .cu-lb-header {
@@ -2002,7 +2200,7 @@ function injectStyles() {
       justify-content: space-between;
       align-items: center;
       padding: 14px 18px;
-      border-bottom: 1px solid #263048;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
       flex-shrink: 0;
     }
 

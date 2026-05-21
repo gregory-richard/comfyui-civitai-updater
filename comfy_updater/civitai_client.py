@@ -16,9 +16,10 @@ except Exception:  # pragma: no cover - optional import guard
 
 
 class CivitaiClient:
-    def __init__(self, api_key: str, timeout_seconds: int, max_retries: int):
+    def __init__(self, api_key: str, timeout_seconds: int, max_retries: int, civitai_domain: str = "civitai.com"):
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
+        self.civitai_domain = (civitai_domain or "civitai.com").strip()
         self.session = requests.Session()
         self._model_cache: dict[str, dict | None] = {}
         self.default_headers = {
@@ -52,11 +53,11 @@ class CivitaiClient:
         return (creator_name, versions)
 
     def model_page_url(self, model_id: int | str) -> str:
-        return f"{MODEL_PAGE_BASE_URL}/{model_id}"
+        return f"https://{self.civitai_domain}/models/{model_id}"
 
     def version_page_url(self, model_id: int | str, version_id: int | str | None = None) -> str:
         if version_id:
-            return f"{MODEL_PAGE_BASE_URL}/{model_id}?modelVersionId={version_id}"
+            return f"https://{self.civitai_domain}/models/{model_id}?modelVersionId={version_id}"
         return self.model_page_url(model_id)
 
     def download_file(self, url: str, target_path: Path, max_bytes: int = 10_000_000) -> bool:
@@ -176,7 +177,10 @@ class CivitaiClient:
                         return response.json()
                     except ValueError:
                         return None
-                if response.status_code in (400, 401, 403, 404):
+                if response.status_code in (401, 403):
+                    print(f"Civitai API Key validation failed: {response.status_code} {response.reason}. Please verify your API Key in the settings panel.")
+                    return None
+                if response.status_code in (400, 404):
                     return None
                 last_error = f"{response.status_code} {response.reason}"
 

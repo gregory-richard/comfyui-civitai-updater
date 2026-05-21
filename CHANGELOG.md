@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.0] - 2026-05-21
+
+### Added
+- Preferred Civitai domain configuration setting (`civitai.com` or `civitai.red` mirror) to dynamically format model page and version links.
+- Interactive hover tooltips using custom `.cu-tooltip` styling.
+- Tooltip-enabled information triggers (`ⓘ`) next to settings options ("Force rehash", "Refetch existing metadata during scans").
+
+### Fixed
+- API key overwrite vulnerability that wiped backend credentials on browser settings hydration.
+- Polling resilience in frontend to retry up to 5 times during server restart or network interruption.
+- Intercepted 401/403 errors in API client to log clear authentication warnings instead of misleading 404 logs.
+
+### Improved
+- Premium UI aesthetics, including glassmorphism layouts, card hovering scale micro-animations, and smooth filter dropdown transitions.
+- Renamed buttons "Scan + Check Updates" -> "Check for Updates" and "Scan Only (Metadata)" -> "Scan Metadata Only" for better clarity.
+- Styled cache status checks as visual colored pills (`cached` in green, `stale` in orange, `changes detected` in red) with descriptive hover tooltips.
+- Aligned user documentation (`README.md` and `wiki/Usage.md`) with the new control panel labels.
+
 ## [1.1.0] - 2026-03-04
 
 ### Added

@@ -15,7 +15,7 @@ Go to `Settings -> Civitai Updater`:
 
 ## 3. Quick workflow
 
-1. Click `Scan + Check Updates`.
+1. Click `Check for Updates`.
 2. Watch progress bar and status.
 3. Review `Updates Results` cards (update-only).
 4. Use the multi-select `Types` and `Bases` filters, plus `Show hidden`, to narrow the result list.
@@ -23,12 +23,12 @@ Go to `Settings -> Civitai Updater`:
 
 ## 4. Scan workflow (Advanced)
 
-Open `Advanced`, then run `Scan Only (Metadata)`.
+Run `Scan Metadata Only`.
 
 - Scan only refreshes metadata sidecars.
 - Scan report is compact (`total/refreshed/skipped/notFound/errors`).
 - Scan does not fill update cards.
-- After scan, run `Scan + Check Updates` to see updates.
+- After scan, run `Check for Updates` to see updates.
 
 ## 5. Pagination and streaming
 
