@@ -268,10 +268,6 @@ def _normalize_config_payload(payload: dict) -> dict:
         key = payload.get("apiKey")
         incoming["apiKey"] = key if isinstance(key, str) else ""
 
-    if "civitaiDomain" in payload:
-        domain = payload.get("civitaiDomain")
-        incoming["civitaiDomain"] = domain if isinstance(domain, str) else "civitai.com"
-
     if "cacheTtlMinutes" in payload:
         incoming["cacheTtlMinutes"] = payload.get("cacheTtlMinutes")
     if "requestTimeoutSeconds" in payload:

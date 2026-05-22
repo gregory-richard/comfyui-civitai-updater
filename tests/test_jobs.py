@@ -19,6 +19,7 @@ def make_item(
     base_model: str,
     model_path: str,
     remote_versions: list[dict],
+    nsfw: bool = False,
 ) -> dict:
     primary = remote_versions[0] if remote_versions else {}
     return {
@@ -45,6 +46,7 @@ def make_item(
         "downloadUrl": primary.get("downloadUrl", ""),
         "hasUpdate": bool(remote_versions),
         "status": "ok",
+        "nsfw": nsfw,
     }
 
 
@@ -184,6 +186,56 @@ class JobManagerTests(unittest.TestCase):
         self.assertEqual("m2", items[0]["modelId"])
         self.assertEqual(["checkpoint", "lora"], facets["modelTypes"])
         self.assertEqual(["Flux.1 D", "SDXL 1.0"], facets["baseModels"])
+
+    def test_grouping_aggregates_nsfw_flag(self) -> None:
+        # Test grouped items
+        self.job.items = [
+            make_item(
+                model_id="m_nsfw",
+                model_name="NSFW Model",
+                model_type="checkpoint",
+                local_version_id="v1",
+                local_version_name="v1",
+                local_version_date="2026-03-01T00:00:00Z",
+                base_model="SDXL 1.0",
+                model_path="C:\\models\\nsfw-1.safetensors",
+                remote_versions=[],
+                nsfw=True,
+            ),
+            make_item(
+                model_id="m_nsfw",
+                model_name="NSFW Model",
+                model_type="checkpoint",
+                local_version_id="v2",
+                local_version_name="v2",
+                local_version_date="2026-03-02T00:00:00Z",
+                base_model="SDXL 1.0",
+                model_path="C:\\models\\nsfw-2.safetensors",
+                remote_versions=[],
+                nsfw=False,
+            ),
+        ]
+        total, _, _, items, _ = self.manager.get_items("job-1")
+        self.assertEqual(1, total)
+        self.assertTrue(items[0]["nsfw"])
+
+        # Test ungrouped items (no modelId/modelUrl)
+        self.job.items = [
+            {
+                "modelPath": "C:\\models\\unknown.safetensors",
+                "modelType": "checkpoint",
+                "nsfw": True,
+                "localVersionId": "v1",
+                "localVersionName": "v1",
+                "localVersionDate": "2026-03-01T00:00:00Z",
+                "baseModel": "SDXL 1.0",
+                "localPreviewUrl": "",
+                "localPreviewType": "image",
+            }
+        ]
+        total, _, _, items, _ = self.manager.get_items("job-1")
+        self.assertEqual(1, total)
+        self.assertTrue(items[0]["nsfw"])
 
 
 if __name__ == "__main__":

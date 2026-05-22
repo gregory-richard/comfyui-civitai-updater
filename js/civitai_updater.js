@@ -12,7 +12,6 @@ const POLL_MS = 800;
 
 const SETTINGS = {
   apiKey: "CivitaiUpdater.APIKey",
-  civitaiDomain: "CivitaiUpdater.CivitaiDomain",
   cacheTtlMinutes: "CivitaiUpdater.CacheTtlMinutes",
   requestTimeoutSeconds: "CivitaiUpdater.RequestTimeoutSeconds",
   maxRetries: "CivitaiUpdater.MaxRetries",
@@ -89,7 +88,6 @@ app.registerExtension({
   name: EXTENSION_NAME,
   settings: [
     { id: SETTINGS.apiKey, name: "API Key", type: "text", defaultValue: "", attrs: { type: "password", autocomplete: "off" }, tooltip: "Optional Civitai API key for restricted resources.", category: ["Civitai Updater", "Network", "API Key"], onChange: () => scheduleSettingsSync() },
-    { id: SETTINGS.civitaiDomain, name: "Civitai Domain", type: "combo", defaultValue: "civitai.com", options: ["civitai.com", "civitai.red"], tooltip: "Preferred Civitai domain/mirror for page links.", category: ["Civitai Updater", "General", "Civitai Domain"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.cacheTtlMinutes, name: "Cache Duration (minutes)", type: "number", defaultValue: 240, attrs: { min: 0, max: 10080, step: 30 }, tooltip: "How long to reuse cached check results before re-checking. 0 = always check fresh.", category: ["Civitai Updater", "General", "Cache Duration"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.requestTimeoutSeconds, name: "Request Timeout (seconds)", type: "number", defaultValue: 30, attrs: { min: 5, max: 300, step: 1 }, category: ["Civitai Updater", "Network", "Request Timeout"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.maxRetries, name: "Max Retries", type: "number", defaultValue: 4, attrs: { min: 0, max: 10, step: 1 }, category: ["Civitai Updater", "Network", "Max Retries"], onChange: () => scheduleSettingsSync() },
@@ -973,7 +971,6 @@ async function hydrateSettingsFromBackend() {
     } else {
       setSetting(SETTINGS.apiKey, "");
     }
-    setSetting(SETTINGS.civitaiDomain, cfg.civitaiDomain ?? "civitai.com");
     setSetting(SETTINGS.cacheTtlMinutes, Number(cfg.cacheTtlMinutes ?? 240));
     setSetting(SETTINGS.requestTimeoutSeconds, Number(cfg.requestTimeoutSeconds ?? 30));
     setSetting(SETTINGS.maxRetries, Number(cfg.maxRetries ?? 4));
@@ -1003,7 +1000,6 @@ function scheduleSettingsSync(immediate = false) {
 async function syncSettingsToBackend() {
   const apiKeyVal = String(getSetting(SETTINGS.apiKey, "") || "");
   const payload = {
-    civitaiDomain: String(getSetting(SETTINGS.civitaiDomain, "civitai.com")),
     cacheTtlMinutes: Number(getSetting(SETTINGS.cacheTtlMinutes, 240)),
     requestTimeoutSeconds: Number(getSetting(SETTINGS.requestTimeoutSeconds, 30)),
     maxRetries: Number(getSetting(SETTINGS.maxRetries, 4)),

@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0] - 2026-05-22
+
+### Removed
+- Obsolete "Civitai Domain" settings option from the frontend UI and backend configurations.
+
+### Improved
+- Model and version links now always open on `civitai.red` to bypass mature content warnings and redirection prompts.
+
 ## [1.2.0] - 2026-05-21
 
 ### Added

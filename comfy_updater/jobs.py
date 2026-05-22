@@ -151,12 +151,7 @@ class JobManager:
         return None
 
     def load_cached_check(self, cache_data: dict) -> JobRecord:
-        domain = "civitai.com"
-        if self.config_store:
-            config = self.config_store.get()
-            domain = config.get("civitaiDomain", "civitai.com")
-
-        items = [_normalize_cached_item_urls(item, domain) for item in cache_data.get("items", []) or []]
+        items = [_normalize_cached_item_urls(item) for item in cache_data.get("items", []) or []]
         summary = cache_data.get("summary", {})
         checked_at = cache_data.get("checkedAt", "")
 
@@ -261,13 +256,13 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _normalize_cached_item_urls(item: dict, civitai_domain: str = "civitai.com") -> dict:
+def _normalize_cached_item_urls(item: dict, civitai_domain: str = "civitai.red") -> dict:
     if not isinstance(item, dict):
         return item
 
     normalized = dict(item)
     for key in ("modelUrl", "versionUrl"):
-        normalized[key] = _normalize_civitai_model_page_url(normalized.get(key, ""), civitai_domain)
+        normalized[key] = _normalize_civitai_model_page_url(normalized.get(key, ""))
 
     remote_versions = []
     for version in normalized.get("remoteVersions", []) or []:
@@ -275,15 +270,17 @@ def _normalize_cached_item_urls(item: dict, civitai_domain: str = "civitai.com")
             remote_versions.append(version)
             continue
         version_copy = dict(version)
-        version_copy["versionUrl"] = _normalize_civitai_model_page_url(version_copy.get("versionUrl", ""), civitai_domain)
+        version_copy["versionUrl"] = _normalize_civitai_model_page_url(version_copy.get("versionUrl", ""))
         remote_versions.append(version_copy)
     normalized["remoteVersions"] = remote_versions
     return normalized
 
 
-def _normalize_civitai_model_page_url(url: str, civitai_domain: str = "civitai.com") -> str:
+def _normalize_civitai_model_page_url(url: str, civitai_domain: str = "civitai.red", nsfw: bool = False) -> str:
     if not isinstance(url, str) or not url:
         return ""
+
+    target_domain = "civitai.red"
 
     legacy_bases = (
         "https://civitai.com/models",
@@ -293,7 +290,7 @@ def _normalize_civitai_model_page_url(url: str, civitai_domain: str = "civitai.c
     )
     for legacy_base in legacy_bases:
         if url.startswith(legacy_base):
-            return f"https://{civitai_domain}/models{url[len(legacy_base):]}"
+            return f"https://{target_domain}/models{url[len(legacy_base):]}"
     return url
 
 
@@ -401,6 +398,7 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
     primary_visible = new_versions[0] if new_versions else {}
     primary_any = primary_visible or (hidden_versions[0] if hidden_versions else {})
     local_preview = next((version for version in local_versions if version.get("previewUrl")), {})
+    nsfw = any(bool(member.get("nsfw")) for member in members)
 
     return {
         "modelId": model_id,
@@ -425,6 +423,7 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
         "previewType": primary_any.get("previewType") or local_preview.get("previewType", "image"),
         "versionUrl": primary_any.get("versionUrl", ""),
         "downloadUrl": primary_any.get("downloadUrl", ""),
+        "nsfw": nsfw,
     }
 
 
@@ -463,6 +462,7 @@ def _build_ungrouped_item(item: dict, provisional: bool) -> dict:
         "previewType": item.get("previewType", "image"),
         "versionUrl": item.get("versionUrl", ""),
         "downloadUrl": item.get("downloadUrl", ""),
+        "nsfw": bool(item.get("nsfw")),
     }
 
 

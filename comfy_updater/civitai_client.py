@@ -16,10 +16,10 @@ except Exception:  # pragma: no cover - optional import guard
 
 
 class CivitaiClient:
-    def __init__(self, api_key: str, timeout_seconds: int, max_retries: int, civitai_domain: str = "civitai.com"):
+    def __init__(self, api_key: str, timeout_seconds: int, max_retries: int, civitai_domain: str = "civitai.red"):
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
-        self.civitai_domain = (civitai_domain or "civitai.com").strip()
+        self.civitai_domain = "civitai.red"
         self.session = requests.Session()
         self._model_cache: dict[str, dict | None] = {}
         self.default_headers = {
@@ -41,24 +41,25 @@ class CivitaiClient:
     def get_version(self, version_id: int | str) -> dict | None:
         return self._get_json(f"{MODEL_VERSION_BY_ID_URL}/{version_id}")
 
-    def get_model_versions_for_model(self, model_id: int | str) -> tuple[str, list[dict]]:
+    def get_model_versions_for_model(self, model_id: int | str) -> tuple[str, list[dict], bool]:
         model = self.get_model(model_id)
         if not model:
-            return ("", [])
+            return ("", [], False)
         versions = model.get("modelVersions") or []
         creator = model.get("creator")
         creator_name = ""
         if isinstance(creator, dict):
             creator_name = creator.get("username") or ""
-        return (creator_name, versions)
+        is_nsfw = bool(model.get("nsfw"))
+        return (creator_name, versions, is_nsfw)
 
-    def model_page_url(self, model_id: int | str) -> str:
-        return f"https://{self.civitai_domain}/models/{model_id}"
+    def model_page_url(self, model_id: int | str, nsfw: bool = False) -> str:
+        return f"https://civitai.red/models/{model_id}"
 
-    def version_page_url(self, model_id: int | str, version_id: int | str | None = None) -> str:
+    def version_page_url(self, model_id: int | str, version_id: int | str | None = None, nsfw: bool = False) -> str:
         if version_id:
-            return f"https://{self.civitai_domain}/models/{model_id}?modelVersionId={version_id}"
-        return self.model_page_url(model_id)
+            return f"https://civitai.red/models/{model_id}?modelVersionId={version_id}"
+        return self.model_page_url(model_id, nsfw=nsfw)
 
     def download_file(self, url: str, target_path: Path, max_bytes: int = 10_000_000) -> bool:
         """Download a file (e.g. preview image) to *target_path*. Returns True on success."""

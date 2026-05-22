@@ -77,7 +77,6 @@ class UpdaterService:
             api_key=config.get("apiKey", ""),
             timeout_seconds=int(config.get("requestTimeoutSeconds", 30)),
             max_retries=int(config.get("maxRetries", 4)),
-            civitai_domain=config.get("civitaiDomain", "civitai.com"),
         )
 
         stats = {
@@ -120,6 +119,7 @@ class UpdaterService:
                     "hasUpdate": False,
                     "previewUrl": "",
                     "previewType": "image",
+                    "nsfw": False,
                     "lastCheckedAt": _utc_now(),
                 }
 
@@ -178,6 +178,13 @@ class UpdaterService:
         if mode == "scan" and existing_info and not refetch_metadata:
             _download_preview_if_needed(client, model_path, existing_info, force=False)
             _skip_url, _skip_type = _first_preview(existing_info)
+            is_nsfw = False
+            if isinstance(existing_info, dict):
+                is_nsfw = bool(existing_info.get("nsfw"))
+                if not is_nsfw:
+                    model_info = existing_info.get("model")
+                    if isinstance(model_info, dict):
+                        is_nsfw = bool(model_info.get("nsfw"))
             return {
                 "modelPath": str(model_path),
                 "modelType": model_type,
@@ -199,6 +206,7 @@ class UpdaterService:
                 "modelUrl": "",
                 "versionUrl": "",
                 "downloadUrl": "",
+                "nsfw": is_nsfw,
                 "lastCheckedAt": _utc_now(),
             }
 
@@ -270,6 +278,7 @@ class UpdaterService:
                 "modelUrl": "",
                 "versionUrl": "",
                 "downloadUrl": "",
+                "nsfw": False,
             }
             if mode == "scan" and (refetch_metadata or not existing_info):
                 write_json(
@@ -285,8 +294,14 @@ class UpdaterService:
             return payload
 
         if mode == "scan":
-            model_url = client.model_page_url(model_id)
-            version_url = client.version_page_url(model_id, version_data.get("id"))
+            is_nsfw = False
+            if isinstance(version_data, dict):
+                model_info = version_data.get("model")
+                if isinstance(model_info, dict):
+                    is_nsfw = bool(model_info.get("nsfw"))
+
+            model_url = client.model_page_url(model_id, nsfw=is_nsfw)
+            version_url = client.version_page_url(model_id, version_data.get("id"), nsfw=is_nsfw)
             preview_url, preview_type = _first_preview(version_data)
 
             sidecar_payload = dict(version_data)
@@ -321,11 +336,12 @@ class UpdaterService:
                 "modelUrl": model_url,
                 "versionUrl": version_url,
                 "downloadUrl": "",
+                "nsfw": is_nsfw,
                 "lastCheckedAt": _utc_now(),
             }
 
-        creator_name, model_versions = client.get_model_versions_for_model(model_id)
-        remote_versions = _normalize_remote_versions(client, model_id, model_versions)
+        creator_name, model_versions, is_nsfw = client.get_model_versions_for_model(model_id)
+        remote_versions = _normalize_remote_versions(client, model_id, model_versions, nsfw=is_nsfw)
         local_id = str(version_data.get("id") or "")
         local_date = _version_date(version_data)
         new_versions = [
@@ -342,8 +358,8 @@ class UpdaterService:
         preview_url = primary_new_version.get("previewUrl", "") or local_preview_url
         preview_type = primary_new_version.get("previewType", "image") or local_preview_type
 
-        model_url = client.model_page_url(model_id)
-        version_url = primary_new_version.get("versionUrl", "") or client.version_page_url(model_id, local_id)
+        model_url = client.model_page_url(model_id, nsfw=is_nsfw)
+        version_url = primary_new_version.get("versionUrl", "") or client.version_page_url(model_id, local_id, nsfw=is_nsfw)
 
         if local_hash and version_data:
             sidecar_payload = dict(version_data)
@@ -379,6 +395,7 @@ class UpdaterService:
             "modelUrl": model_url,
             "versionUrl": version_url,
             "downloadUrl": primary_new_version.get("downloadUrl", ""),
+            "nsfw": is_nsfw,
             "lastCheckedAt": _utc_now(),
         }
 
@@ -442,6 +459,7 @@ def _normalize_remote_versions(
     client: CivitaiClient,
     model_id: int | str,
     model_versions: list[dict] | None,
+    nsfw: bool = False,
 ) -> list[dict]:
     normalized = []
     for version_data in model_versions or []:
@@ -458,7 +476,7 @@ def _normalize_remote_versions(
                 "baseModel": version_data.get("baseModel", ""),
                 "previewUrl": preview_url,
                 "previewType": preview_type,
-                "versionUrl": client.version_page_url(model_id, version_id),
+                "versionUrl": client.version_page_url(model_id, version_id, nsfw=nsfw),
                 "downloadUrl": _first_download_url(version_data) or "",
             }
         )
