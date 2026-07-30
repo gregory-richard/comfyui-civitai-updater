@@ -32,17 +32,17 @@ class CivitaiClient:
     def get_version_by_hash(self, sha256_hash: str) -> dict | None:
         return self._get_json(f"{VERSION_BY_HASH_URL}/{sha256_hash}")
 
-    def get_model(self, model_id: int | str) -> dict | None:
+    def get_model(self, model_id: int | str, *, raise_on_error: bool = False) -> dict | None:
         key = str(model_id)
         if key not in self._model_cache:
-            self._model_cache[key] = self._get_json(f"{MODEL_BY_ID_URL}/{model_id}")
+            self._model_cache[key] = self._get_json(f"{MODEL_BY_ID_URL}/{model_id}", raise_on_error=raise_on_error)
         return self._model_cache[key]
 
     def get_version(self, version_id: int | str) -> dict | None:
         return self._get_json(f"{MODEL_VERSION_BY_ID_URL}/{version_id}")
 
     def get_model_versions_for_model(self, model_id: int | str) -> tuple[str, list[dict], bool]:
-        model = self.get_model(model_id)
+        model = self.get_model(model_id, raise_on_error=True)
         if not model:
             return ("", [], False)
         versions = model.get("modelVersions") or []
@@ -160,7 +160,7 @@ class CivitaiClient:
         finally:
             tmp_video.unlink(missing_ok=True)
 
-    def _get_json(self, url: str) -> dict | None:
+    def _get_json(self, url: str, *, raise_on_error: bool = False) -> dict | None:
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -190,6 +190,8 @@ class CivitaiClient:
 
         if last_error:
             print(f"Civitai updater request failed: {url} :: {last_error}")
+            if raise_on_error:
+                raise CivitaiRequestError(f"{url} :: {last_error}")
         return None
 
     def _download_bytes(self, url: str, max_bytes: int) -> bytes | None:
@@ -222,4 +224,8 @@ def _retry_delay_seconds(attempt: int) -> float:
 
 def _is_png_data(data: bytes) -> bool:
     return data.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+class CivitaiRequestError(RuntimeError):
+    """Raised when a Civitai request fails after retries."""
 

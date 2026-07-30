@@ -6,6 +6,12 @@ from pathlib import Path
 
 from comfy_updater.archived_updates import ArchivedUpdateStore
 from comfy_updater.jobs import JobManager, JobRecord
+from comfy_updater.updater_service import _normalize_remote_versions
+
+
+class FakeCivitaiClient:
+    def version_page_url(self, model_id, version_id, nsfw=False):  # noqa: ARG002
+        return f"https://example.com/models/{model_id}?modelVersionId={version_id}"
 
 
 def make_item(
@@ -20,6 +26,7 @@ def make_item(
     model_path: str,
     remote_versions: list[dict],
     nsfw: bool = False,
+    metadata_only: bool = False,
 ) -> dict:
     primary = remote_versions[0] if remote_versions else {}
     return {
@@ -29,6 +36,7 @@ def make_item(
         "creatorName": "artist",
         "modelUrl": f"https://civitai.com/models/{model_id}",
         "modelPath": model_path,
+        "metadataOnly": metadata_only,
         "baseModel": base_model,
         "localVersionId": local_version_id,
         "localVersionName": local_version_name,
@@ -61,6 +69,24 @@ class JobManagerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
+    def test_remote_version_normalization_preserves_availability(self) -> None:
+        versions = _normalize_remote_versions(
+            FakeCivitaiClient(),
+            "m1",
+            [
+                {
+                    "id": "v1",
+                    "name": "Paid Window",
+                    "publishedAt": "2026-03-07T00:00:00Z",
+                    "baseModel": "SDXL 1.0",
+                    "availability": "EarlyAccess",
+                    "downloadUrl": "https://example.com/download/v1",
+                }
+            ],
+        )
+
+        self.assertEqual("EarlyAccess", versions[0]["availability"])
+
     def test_grouping_uses_newest_local_date_and_archive_partition(self) -> None:
         remote_versions = [
             {
@@ -72,6 +98,7 @@ class JobManagerTests(unittest.TestCase):
                 "previewType": "image",
                 "versionUrl": "https://example.com/v-new-2",
                 "downloadUrl": "https://example.com/d-new-2",
+                "availability": "EarlyAccess",
             },
             {
                 "versionId": "v-new-1",
@@ -82,6 +109,7 @@ class JobManagerTests(unittest.TestCase):
                 "previewType": "image",
                 "versionUrl": "https://example.com/v-new-1",
                 "downloadUrl": "https://example.com/d-new-1",
+                "availability": "Public",
             },
             {
                 "versionId": "v-old",
@@ -103,8 +131,9 @@ class JobManagerTests(unittest.TestCase):
                 local_version_name="Photo 1",
                 local_version_date="2026-03-01T00:00:00Z",
                 base_model="SDXL 1.0",
-                model_path="C:\\models\\one-a.safetensors",
+                model_path="C:\\models\\one-a.civitai.info",
                 remote_versions=remote_versions,
+                metadata_only=True,
             ),
             make_item(
                 model_id="m1",
@@ -126,6 +155,9 @@ class JobManagerTests(unittest.TestCase):
         self.assertEqual("2026-03-05T00:00:00Z", grouped["newestLocalVersionDate"])
         self.assertEqual(["v-new-2"], [entry["versionId"] for entry in grouped["newVersions"]])
         self.assertEqual(["v-new-1"], [entry["versionId"] for entry in grouped["hiddenNewVersions"]])
+        self.assertEqual("EarlyAccess", grouped["newVersions"][0]["availability"])
+        self.assertEqual("EarlyAccess", grouped["latestAvailability"])
+        self.assertTrue(grouped["localVersions"][1]["metadataOnly"])
         self.assertNotIn("v-old", [entry["versionId"] for entry in grouped["newVersions"]])
 
         summary = self.manager.summarize_check_items({"mode": "check", "total": 2}, self.job.items)

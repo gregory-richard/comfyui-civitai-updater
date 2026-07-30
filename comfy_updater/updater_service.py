@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 from typing import Callable
 
-from .civitai_client import CivitaiClient
+from .civitai_client import CivitaiClient, CivitaiRequestError
 from .path_resolver import list_model_files, normalize_model_types, resolve_model_roots
 from .sidecar import info_sidecar_path, preview_sidecar_path, read_json, write_json
 from .hashing import sha256_file
@@ -49,7 +49,10 @@ class UpdaterService:
         config = self.config_store.get()
         model_types = normalize_model_types(None)
         roots = resolve_model_roots(config, model_types, include_custom_paths=True)
-        files = list_model_files(roots)
+        files = list_model_files(
+            roots,
+            include_sidecar_only=bool(config.get("treatSidecarsAsInstalled", True)),
+        )
         return {str(f["path"]).lower() for f in files}
 
     def _run(
@@ -68,7 +71,12 @@ class UpdaterService:
         request_delay_seconds = max(0.0, int(config.get("requestDelayMs", 120)) / 1000.0)
 
         roots = resolve_model_roots(config, model_types, include_custom_paths=include_custom)
-        files = _dedupe_model_files(list_model_files(roots))
+        files = _dedupe_model_files(
+            list_model_files(
+                roots,
+                include_sidecar_only=bool(config.get("treatSidecarsAsInstalled", True)),
+            )
+        )
         total = len(files)
 
         progress(0, total, f"Discovered {total} model files")
@@ -97,6 +105,9 @@ class UpdaterService:
 
             model_path = model_entry["path"]
             model_type = model_entry["modelType"]
+            info_path = model_entry.get("infoPath")
+            preview_path = model_entry.get("previewPath")
+            metadata_only = bool(model_entry.get("metadataOnly"))
             progress(index - 1, total, f"{mode}: {model_path.name}")
 
             try:
@@ -107,12 +118,15 @@ class UpdaterService:
                     mode=mode,
                     refetch_metadata=refetch_metadata,
                     force_rehash=force_rehash,
+                    info_path=info_path,
+                    preview_path=preview_path,
+                    metadata_only=metadata_only,
                 )
             except Exception as exc:  # noqa: BLE001 - return per-file errors without killing the whole job
-                stats["errors"] += 1
                 item = {
                     "modelPath": str(model_path),
                     "modelType": model_type,
+                    "metadataOnly": metadata_only,
                     "modelId": "",
                     "status": "error",
                     "error": str(exc),
@@ -129,6 +143,8 @@ class UpdaterService:
                 stats["notFound"] += 1
             if item.get("status") == "skipped":
                 stats["skipped"] += 1
+            if item.get("status") == "error":
+                stats["errors"] += 1
             if item.get("hasUpdate"):
                 stats["withUpdates"] += 1
 
@@ -171,12 +187,16 @@ class UpdaterService:
         mode: str,
         refetch_metadata: bool,
         force_rehash: bool,
+        info_path: Path | None = None,
+        preview_path: Path | None = None,
+        metadata_only: bool = False,
     ) -> dict:
-        info_path = info_sidecar_path(model_path)
+        info_path = info_path or info_sidecar_path(model_path)
+        preview_path = preview_path or preview_sidecar_path(model_path)
 
         existing_info = read_json(info_path)
         if mode == "scan" and existing_info and not refetch_metadata:
-            _download_preview_if_needed(client, model_path, existing_info, force=False)
+            _download_preview_if_needed(client, preview_path, existing_info, force=False)
             _skip_url, _skip_type = _first_preview(existing_info)
             is_nsfw = False
             if isinstance(existing_info, dict):
@@ -188,6 +208,7 @@ class UpdaterService:
             return {
                 "modelPath": str(model_path),
                 "modelType": model_type,
+                "metadataOnly": metadata_only,
                 "modelId": existing_info.get("modelId", ""),
                 "modelName": _model_name(existing_info),
                 "baseModel": existing_info.get("baseModel", ""),
@@ -216,7 +237,7 @@ class UpdaterService:
 
         can_use_sidecar = (
             mode == "check"
-            and not force_rehash
+            and (metadata_only or not force_rehash)
             and existing_info
             and existing_info.get("modelId")
             and existing_info.get("id")
@@ -224,7 +245,7 @@ class UpdaterService:
         can_refetch_by_sidecar_id = (
             mode == "scan"
             and refetch_metadata
-            and not force_rehash
+            and (metadata_only or not force_rehash)
             and existing_info
             and existing_info.get("modelId")
             and existing_info.get("id")
@@ -243,7 +264,7 @@ class UpdaterService:
                 "model": existing_info.get("model", {}),
                 "images": existing_info.get("images", []),
             }
-            _download_preview_if_needed(client, model_path, version_data, force=False)
+            _download_preview_if_needed(client, preview_path, version_data, force=False)
         elif can_refetch_by_sidecar_id:
             model_id = existing_info.get("modelId")
             version_data = client.get_version(existing_info.get("id"))
@@ -251,20 +272,23 @@ class UpdaterService:
                 model_id = version_data.get("modelId") or model_id
             else:
                 # Fallback when the sidecar version id is stale or unavailable.
+                if not metadata_only:
+                    local_hash = sha256_file(model_path)
+                    version_data = client.get_version_by_hash(local_hash)
+                    if version_data:
+                        model_id = version_data.get("modelId")
+        else:
+            if not metadata_only:
                 local_hash = sha256_file(model_path)
                 version_data = client.get_version_by_hash(local_hash)
                 if version_data:
                     model_id = version_data.get("modelId")
-        else:
-            local_hash = sha256_file(model_path)
-            version_data = client.get_version_by_hash(local_hash)
-            if version_data:
-                model_id = version_data.get("modelId")
 
         if not version_data or not model_id:
             payload = {
                 "modelPath": str(model_path),
                 "modelType": model_type,
+                "metadataOnly": metadata_only,
                 "modelId": "",
                 "modelName": "",
                 "baseModel": "",
@@ -280,7 +304,7 @@ class UpdaterService:
                 "downloadUrl": "",
                 "nsfw": False,
             }
-            if mode == "scan" and (refetch_metadata or not existing_info):
+            if mode == "scan" and not metadata_only and (refetch_metadata or not existing_info):
                 write_json(
                     info_path,
                     {
@@ -313,11 +337,12 @@ class UpdaterService:
             if refetch_metadata or not existing_info:
                 write_json(info_path, sidecar_payload)
 
-            _download_preview_if_needed(client, model_path, version_data, force=False)
+            _download_preview_if_needed(client, preview_path, version_data, force=False)
 
             return {
                 "modelPath": str(model_path),
                 "modelType": model_type,
+                "metadataOnly": metadata_only,
                 "modelId": str(model_id),
                 "modelName": _model_name(version_data),
                 "baseModel": version_data.get("baseModel", ""),
@@ -340,7 +365,40 @@ class UpdaterService:
                 "lastCheckedAt": _utc_now(),
             }
 
-        creator_name, model_versions, is_nsfw = client.get_model_versions_for_model(model_id)
+        try:
+            creator_name, model_versions, is_nsfw = client.get_model_versions_for_model(model_id)
+        except CivitaiRequestError as exc:
+            local_preview_url, local_preview_type = _first_preview(version_data)
+            return {
+                "modelPath": str(model_path),
+                "modelType": model_type,
+                "metadataOnly": metadata_only,
+                "modelId": str(model_id),
+                "modelName": _model_name(version_data),
+                "baseModel": version_data.get("baseModel", ""),
+                "status": "error",
+                "error": str(exc),
+                "hasUpdate": False,
+                "localHash": local_hash or "",
+                "localVersionId": version_data.get("id", ""),
+                "localVersionName": version_data.get("name", ""),
+                "localVersionDate": _version_date(version_data),
+                "latestVersionId": "",
+                "latestVersionName": "",
+                "latestBaseModel": "",
+                "latestVersionDate": "",
+                "creatorName": "",
+                "previewUrl": local_preview_url,
+                "previewType": local_preview_type,
+                "localPreviewUrl": local_preview_url,
+                "localPreviewType": local_preview_type,
+                "remoteVersions": [],
+                "modelUrl": client.model_page_url(model_id),
+                "versionUrl": client.version_page_url(model_id, version_data.get("id")),
+                "downloadUrl": "",
+                "nsfw": False,
+                "lastCheckedAt": _utc_now(),
+            }
         remote_versions = _normalize_remote_versions(client, model_id, model_versions, nsfw=is_nsfw)
         local_id = str(version_data.get("id") or "")
         local_date = _version_date(version_data)
@@ -368,11 +426,12 @@ class UpdaterService:
             sidecar_payload["extensions"]["source"] = "comfy-civitai-updater"
             sidecar_payload["extensions"]["updatedAt"] = _utc_now()
             write_json(info_path, sidecar_payload)
-            _download_preview_if_needed(client, model_path, version_data)
+            _download_preview_if_needed(client, preview_path, version_data)
 
         return {
             "modelPath": str(model_path),
             "modelType": model_type,
+            "metadataOnly": metadata_only,
             "modelId": str(model_id),
             "modelName": _model_name(version_data),
             "baseModel": version_data.get("baseModel", ""),
@@ -478,6 +537,7 @@ def _normalize_remote_versions(
                 "previewType": preview_type,
                 "versionUrl": client.version_page_url(model_id, version_id, nsfw=nsfw),
                 "downloadUrl": _first_download_url(version_data) or "",
+                "availability": _version_availability(version_data),
             }
         )
     normalized.sort(
@@ -485,6 +545,11 @@ def _normalize_remote_versions(
         reverse=True,
     )
     return normalized
+
+
+def _version_availability(version_data: dict) -> str:
+    availability = version_data.get("availability")
+    return availability if isinstance(availability, str) else ""
 
 
 def _set_sha256_hash(version_data: dict, sha256_hash: str) -> None:
@@ -503,14 +568,13 @@ def _set_sha256_hash(version_data: dict, sha256_hash: str) -> None:
 
 def _download_preview_if_needed(
     client: CivitaiClient,
-    model_path: Path,
+    preview_path: Path,
     version_data: dict,
     force: bool = False,
 ) -> None:
     preview_url, preview_type = _first_preview(version_data)
     if not preview_url:
         return
-    preview_path = preview_sidecar_path(model_path)
     if not force and preview_path.exists():
         return
     if preview_type == "video":

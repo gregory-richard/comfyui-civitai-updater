@@ -37,10 +37,16 @@ Use `Settings -> Civitai Updater`.
 - API key (optional)
 - cache TTL
 - timeout / retries / per-model delay
+- treat valid `.civitai.info` sidecars as installed models (enabled by default)
 - path sources:
   - Comfy default paths
   - `extra_model_paths.yaml`
   - custom paths per model type
+
+When sidecar-only tracking is enabled, an orphan `.civitai.info` file with valid
+Civitai `modelId` and version `id` fields counts as an installed version for
+update comparisons. Preview PNGs do not count by themselves, and malformed or
+incomplete sidecars are ignored.
 
 ## API Snapshot
 

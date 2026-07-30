@@ -16,6 +16,7 @@ const SETTINGS = {
   requestTimeoutSeconds: "CivitaiUpdater.RequestTimeoutSeconds",
   maxRetries: "CivitaiUpdater.MaxRetries",
   requestDelayMs: "CivitaiUpdater.RequestDelayMs",
+  treatSidecarsAsInstalled: "CivitaiUpdater.TreatSidecarsAsInstalled",
   useComfyPaths: "CivitaiUpdater.PathSources.UseComfy",
   useExtraModelPaths: "CivitaiUpdater.PathSources.UseExtraModelPaths",
   useCustomPaths: "CivitaiUpdater.PathSources.UseCustom",
@@ -41,6 +42,7 @@ const state = {
   forceNextRecheck: false,
   cachedJobId: null,
   cacheFilesChanged: null,
+  treatSidecarsAsInstalled: null,
 
   checkJobId: null,
   checkSummary: null,
@@ -92,6 +94,7 @@ app.registerExtension({
     { id: SETTINGS.requestTimeoutSeconds, name: "Request Timeout (seconds)", type: "number", defaultValue: 30, attrs: { min: 5, max: 300, step: 1 }, category: ["Civitai Updater", "Network", "Request Timeout"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.maxRetries, name: "Max Retries", type: "number", defaultValue: 4, attrs: { min: 0, max: 10, step: 1 }, category: ["Civitai Updater", "Network", "Max Retries"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.requestDelayMs, name: "Delay Between Models (ms)", type: "number", defaultValue: 120, attrs: { min: 0, max: 3000, step: 10 }, tooltip: "Small delay between model checks to reduce request bursts.", category: ["Civitai Updater", "Network", "Request Delay"], onChange: () => scheduleSettingsSync() },
+    { id: SETTINGS.treatSidecarsAsInstalled, name: "Treat .civitai.info as Installed", type: "boolean", defaultValue: true, tooltip: "Count valid .civitai.info files as installed model versions when the weight file is missing.", category: ["Civitai Updater", "General", "Sidecar-only Models"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.useComfyPaths, name: "Use Comfy Default Paths", type: "boolean", defaultValue: true, category: ["Civitai Updater", "Path Sources", "Comfy Defaults"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.useExtraModelPaths, name: "Use extra_model_paths.yaml", type: "boolean", defaultValue: true, category: ["Civitai Updater", "Path Sources", "Extra Model Paths"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.useCustomPaths, name: "Use Custom Paths", type: "boolean", defaultValue: true, category: ["Civitai Updater", "Path Sources", "Custom Paths"], onChange: () => scheduleSettingsSync() },
@@ -708,9 +711,11 @@ function renderResults() {
 
     const localRows = localVersions.map((v) => {
       const date = v.publishedAt ? shortDate(v.publishedAt) : "";
+      const localRole = v.metadataOnly ? "metadata" : "saved";
+      const localLabel = v.metadataOnly ? "Metadata only" : "Saved";
       return `
         <div class="cu-ver-row">
-          <span class="cu-ver-label" data-role="saved">Saved</span>
+          <span class="cu-ver-label" data-role="${localRole}">${localLabel}</span>
           <span class="cu-ver-date">${escapeHtml(date || "—")}</span>
           <span class="cu-ver-base">${escapeHtml(v.baseModel || "—")}</span>
           <span class="cu-ver-main">
@@ -812,6 +817,7 @@ function renderRemoteVersionRow(modelId, version, hidden) {
   const action = hidden
     ? `<button class="cu-inline-btn" data-archive-action="restore" data-model-id="${escapeHtml(modelId || "")}" data-version-id="${escapeHtml(version.versionId || "")}">Unarchive</button>`
     : `<button class="cu-inline-btn" data-archive-action="archive" data-model-id="${escapeHtml(modelId || "")}" data-version-id="${escapeHtml(version.versionId || "")}">Hide</button>`;
+  const accessBadge = renderAvailabilityBadge(version.availability);
   const hiddenClass = hidden ? " is-hidden" : "";
   return `
     <div class="cu-ver-row${hiddenClass}">
@@ -820,9 +826,21 @@ function renderRemoteVersionRow(modelId, version, hidden) {
       <span class="cu-ver-base">${escapeHtml(version.baseModel || "—")}</span>
       <span class="cu-ver-main">
         ${link}
+        ${accessBadge}
         ${action}
       </span>
     </div>`;
+}
+
+function renderAvailabilityBadge(availability) {
+  if (!availability || availability === "Public") return "";
+  const label = formatAvailability(availability);
+  return `<span class="cu-access-badge" data-availability="${escapeHtml(availability)}" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
+}
+
+function formatAvailability(value) {
+  if (value === "EarlyAccess") return "Early access";
+  return String(value).replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 
 function renderFilterMenu(kind, label, options, selected, capitalizeValues) {
@@ -975,6 +993,8 @@ async function hydrateSettingsFromBackend() {
     setSetting(SETTINGS.requestTimeoutSeconds, Number(cfg.requestTimeoutSeconds ?? 30));
     setSetting(SETTINGS.maxRetries, Number(cfg.maxRetries ?? 4));
     setSetting(SETTINGS.requestDelayMs, Number(cfg.requestDelayMs ?? 120));
+    state.treatSidecarsAsInstalled = Boolean(cfg.treatSidecarsAsInstalled ?? true);
+    setSetting(SETTINGS.treatSidecarsAsInstalled, state.treatSidecarsAsInstalled);
     setSetting(SETTINGS.useComfyPaths, Boolean(cfg.useComfyPaths ?? true));
     setSetting(SETTINGS.useExtraModelPaths, Boolean(cfg.useExtraModelPaths ?? true));
     setSetting(SETTINGS.useCustomPaths, Boolean(cfg.useCustomPaths ?? true));
@@ -999,11 +1019,15 @@ function scheduleSettingsSync(immediate = false) {
 
 async function syncSettingsToBackend() {
   const apiKeyVal = String(getSetting(SETTINGS.apiKey, "") || "");
+  const treatSidecarsAsInstalled = Boolean(getSetting(SETTINGS.treatSidecarsAsInstalled, true));
+  const sidecarSettingChanged = state.treatSidecarsAsInstalled !== null
+    && state.treatSidecarsAsInstalled !== treatSidecarsAsInstalled;
   const payload = {
     cacheTtlMinutes: Number(getSetting(SETTINGS.cacheTtlMinutes, 240)),
     requestTimeoutSeconds: Number(getSetting(SETTINGS.requestTimeoutSeconds, 30)),
     maxRetries: Number(getSetting(SETTINGS.maxRetries, 4)),
     requestDelayMs: Number(getSetting(SETTINGS.requestDelayMs, 120)),
+    treatSidecarsAsInstalled,
     useComfyPaths: Boolean(getSetting(SETTINGS.useComfyPaths, true)),
     useExtraModelPaths: Boolean(getSetting(SETTINGS.useExtraModelPaths, true)),
     useCustomPaths: Boolean(getSetting(SETTINGS.useCustomPaths, true)),
@@ -1019,8 +1043,15 @@ async function syncSettingsToBackend() {
   }
   try {
     const data = await postJson("/civitai-updater/config", payload);
+    state.treatSidecarsAsInstalled = treatSidecarsAsInstalled;
+    if (sidecarSettingChanged) {
+      state.cacheFilesChanged = true;
+    }
     state.roots = data.effectiveRoots || state.roots;
-    if (state.rootEl) renderRoots();
+    if (state.rootEl) {
+      renderRoots();
+      renderCacheInfo();
+    }
   } catch (error) {
     console.warn("Civitai updater: failed syncing settings", error);
   }
@@ -1840,7 +1871,7 @@ function injectStyles() {
 
     .cu-ver-row {
       display: grid;
-      grid-template-columns: 54px 58px 84px minmax(0, 1fr);
+      grid-template-columns: 82px 58px 84px minmax(0, 1fr);
       align-items: center;
       gap: 6px;
     }
@@ -1869,6 +1900,12 @@ function injectStyles() {
       color: #8d9bb5;
       background: rgba(141, 155, 181, 0.1);
       border: 1px solid rgba(141, 155, 181, 0.15);
+    }
+
+    .cu-ver-label[data-role="metadata"] {
+      color: #c5a76b;
+      background: rgba(197, 167, 107, 0.12);
+      border: 1px solid rgba(197, 167, 107, 0.2);
     }
 
     .cu-ver-label[data-role="new"] {
@@ -1919,6 +1956,18 @@ function injectStyles() {
     .cu-ver-link:hover {
       color: #a0d8ff;
       text-decoration: underline;
+    }
+
+    .cu-access-badge {
+      color: #d7a944;
+      background: rgba(215, 169, 68, 0.12);
+      border: 1px solid rgba(215, 169, 68, 0.24);
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 9px;
+      font-weight: 600;
+      white-space: nowrap;
+      flex: 0 0 auto;
     }
 
     .cu-creator {

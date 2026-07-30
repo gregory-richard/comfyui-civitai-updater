@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
     "useComfyPaths": True,
     "useExtraModelPaths": True,
     "useCustomPaths": True,
+    "treatSidecarsAsInstalled": True,
     "customPaths": {model_type: [] for model_type in SUPPORTED_MODEL_TYPES},
 }
 
@@ -56,6 +57,7 @@ class ConfigStore:
             "useComfyPaths",
             "useExtraModelPaths",
             "useCustomPaths",
+            "treatSidecarsAsInstalled",
         ):
             if key in incoming:
                 merged[key] = incoming[key]
@@ -89,6 +91,7 @@ class ConfigStore:
         merged["useComfyPaths"] = bool(merged["useComfyPaths"])
         merged["useExtraModelPaths"] = bool(merged["useExtraModelPaths"])
         merged["useCustomPaths"] = bool(merged["useCustomPaths"])
+        merged["treatSidecarsAsInstalled"] = bool(merged["treatSidecarsAsInstalled"])
 
         return merged
 

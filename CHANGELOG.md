@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.0] - 2026-07-30
+
+### Added
+- Optional sidecar-only model tracking, enabled by default, so valid orphan `.civitai.info` files count as installed Civitai versions.
+- Metadata-only labels for update cards and cache-aware detection when tracked sidecars are added, removed, or disabled.
+- ComfyUI V3 extension entrypoint while retaining legacy node registration compatibility.
+- Availability badges for non-public Civitai model versions.
+
+### Fixed
+- Model lookup failures now produce actionable error items instead of appearing as update-free results.
+- Metadata-only entries use their stored version IDs and never attempt to hash missing model weights.
+
+### Improved
+- Sidecar discovery ignores malformed metadata and avoids duplicate entries when a matching model weight exists.
+- Expanded automated coverage for sidecar discovery, refresh behavior, force-rehash handling, grouping, and error reporting.
+
 ## [1.3.0] - 2026-05-22
 
 ### Removed

@@ -351,6 +351,7 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
                     "baseModel": member.get("baseModel", ""),
                     "publishedAt": member.get("localVersionDate", ""),
                     "modelPath": member.get("modelPath", ""),
+                    "metadataOnly": bool(member.get("metadataOnly")),
                     "previewUrl": member.get("localPreviewUrl", ""),
                     "previewType": member.get("localPreviewType", "image"),
                 }
@@ -373,6 +374,7 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
                     "previewType": remote_version.get("previewType", "image"),
                     "versionUrl": remote_version.get("versionUrl", ""),
                     "downloadUrl": remote_version.get("downloadUrl", ""),
+                    "availability": remote_version.get("availability", ""),
                 }
 
     local_versions.sort(
@@ -418,6 +420,7 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
         "latestVersionName": primary_visible.get("versionName", ""),
         "latestBaseModel": primary_visible.get("baseModel", ""),
         "latestVersionDate": primary_visible.get("versionDate", ""),
+        "latestAvailability": primary_visible.get("availability", ""),
         "sortVersionDate": primary_any.get("versionDate", ""),
         "previewUrl": primary_any.get("previewUrl") or local_preview.get("previewUrl", ""),
         "previewType": primary_any.get("previewType") or local_preview.get("previewType", "image"),
@@ -435,6 +438,7 @@ def _build_ungrouped_item(item: dict, provisional: bool) -> dict:
             "baseModel": item.get("baseModel", ""),
             "publishedAt": item.get("localVersionDate", ""),
             "modelPath": item.get("modelPath", ""),
+            "metadataOnly": bool(item.get("metadataOnly")),
             "previewUrl": item.get("localPreviewUrl", ""),
             "previewType": item.get("localPreviewType", "image"),
         }
@@ -457,6 +461,7 @@ def _build_ungrouped_item(item: dict, provisional: bool) -> dict:
         "latestVersionName": "",
         "latestBaseModel": "",
         "latestVersionDate": "",
+        "latestAvailability": item.get("latestAvailability", ""),
         "sortVersionDate": "",
         "previewUrl": item.get("previewUrl", ""),
         "previewType": item.get("previewType", "image"),
