@@ -282,6 +282,8 @@ def _normalize_config_payload(payload: dict) -> dict:
         incoming["useExtraModelPaths"] = bool(payload.get("useExtraModelPaths"))
     if "useCustomPaths" in payload:
         incoming["useCustomPaths"] = bool(payload.get("useCustomPaths"))
+    if "treatSidecarsAsInstalled" in payload:
+        incoming["treatSidecarsAsInstalled"] = bool(payload.get("treatSidecarsAsInstalled"))
 
     if "customPaths" in payload:
         custom = payload.get("customPaths")

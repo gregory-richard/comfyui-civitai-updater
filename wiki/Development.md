@@ -20,6 +20,10 @@ Files written beside model files:
 - `.civitai.info` — cached model identity from Civitai
 - `.preview.png` — preview image sidecar (image downloads are converted to PNG; video previews use first frame when available)
 
+With `treatSidecarsAsInstalled` enabled, valid orphan `.civitai.info` files are
+discovered as metadata-only local versions. A matching supported weight file
+takes precedence, and an orphan preview never creates a model entry.
+
 Check results are stored centrally in `.civitai_updater/last_check.json`.
 
 ## Compatibility target

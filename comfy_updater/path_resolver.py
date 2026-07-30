@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .constants import MODEL_TYPE_TO_COMFY_KEYS, SUPPORTED_MODEL_EXTENSIONS, SUPPORTED_MODEL_TYPES
+from .constants import (
+    INFO_SIDECAR_SUFFIX,
+    MODEL_TYPE_TO_COMFY_KEYS,
+    PREVIEW_SIDECAR_SUFFIX,
+    SUPPORTED_MODEL_EXTENSIONS,
+    SUPPORTED_MODEL_TYPES,
+)
+from .sidecar import read_json
 
 try:
     import folder_paths
@@ -50,8 +57,14 @@ def resolve_model_roots(config: dict, model_types: list[str], include_custom_pat
     return roots
 
 
-def list_model_files(roots: dict[str, list[Path]]) -> list[dict]:
+def list_model_files(
+    roots: dict[str, list[Path]],
+    include_sidecar_only: bool = False,
+) -> list[dict]:
     files: list[dict] = []
+    weight_stems: set[str] = set()
+    sidecar_candidates: list[tuple[str, Path]] = []
+
     for model_type, model_roots in roots.items():
         for root in model_roots:
             if not root.is_dir():
@@ -59,10 +72,61 @@ def list_model_files(roots: dict[str, list[Path]]) -> list[dict]:
             for file_path in root.rglob("*"):
                 if not file_path.is_file():
                     continue
-                if file_path.suffix.lower() not in SUPPORTED_MODEL_EXTENSIONS:
-                    continue
-                files.append({"modelType": model_type, "path": file_path})
+                if file_path.suffix.lower() in SUPPORTED_MODEL_EXTENSIONS:
+                    weight_stems.add(_weight_stem_key(file_path))
+                    files.append(
+                        {
+                            "modelType": model_type,
+                            "path": file_path,
+                            "infoPath": file_path.with_suffix(INFO_SIDECAR_SUFFIX),
+                            "previewPath": file_path.with_suffix(PREVIEW_SIDECAR_SUFFIX),
+                            "metadataOnly": False,
+                        }
+                    )
+                elif include_sidecar_only and file_path.name.lower().endswith(INFO_SIDECAR_SUFFIX):
+                    sidecar_candidates.append((model_type, file_path))
+
+    if include_sidecar_only:
+        for model_type, info_path in sidecar_candidates:
+            if _info_stem_key(info_path) in weight_stems:
+                continue
+            if not _is_valid_info_sidecar(info_path):
+                continue
+            files.append(
+                {
+                    "modelType": model_type,
+                    "path": info_path,
+                    "infoPath": info_path,
+                    "previewPath": _preview_path_for_info(info_path),
+                    "metadataOnly": True,
+                }
+            )
+
     return files
+
+
+def _weight_stem_key(model_path: Path) -> str:
+    return str(model_path.with_suffix("")).lower()
+
+
+def _info_stem_key(info_path: Path) -> str:
+    return str(info_path.with_name(info_path.name[: -len(INFO_SIDECAR_SUFFIX)])).lower()
+
+
+def _preview_path_for_info(info_path: Path) -> Path:
+    base_name = info_path.name[: -len(INFO_SIDECAR_SUFFIX)]
+    return info_path.with_name(f"{base_name}{PREVIEW_SIDECAR_SUFFIX}")
+
+
+def _is_valid_info_sidecar(info_path: Path) -> bool:
+    payload = read_json(info_path)
+    if not isinstance(payload, dict):
+        return False
+    return _has_identifier(payload.get("modelId")) and _has_identifier(payload.get("id"))
+
+
+def _has_identifier(value) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, str)) and bool(str(value).strip())
 
 
 def normalize_model_types(raw_types: list[str] | None) -> list[str]:

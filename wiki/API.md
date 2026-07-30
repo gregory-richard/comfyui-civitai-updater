@@ -18,6 +18,7 @@ Request body fields:
 - `requestTimeoutSeconds`: integer (optional)
 - `maxRetries`: integer (optional)
 - `requestDelayMs`: integer (optional)
+- `treatSidecarsAsInstalled`: boolean (optional, defaults to `true`)
 - `customPaths`: object keyed by model type (`checkpoint|lora|vae|unet`)
 
 Response:
@@ -98,6 +99,9 @@ Grouped items now include:
 - `newVersions`
 - `hiddenNewVersions`
 - `isProvisional`
+
+Each local version includes `metadataOnly`, which is `true` when the installed
+version is represented only by a valid `.civitai.info` sidecar.
 
 ## `POST /civitai-updater/archived-updates`
 

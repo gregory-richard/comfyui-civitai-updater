@@ -10,6 +10,7 @@ Go to `Settings -> Civitai Updater`:
 
 - API key (optional)
 - timeout/retries/request delay
+- treat valid `.civitai.info` sidecars as installed models (enabled by default)
 - path source toggles (Comfy defaults, `extra_model_paths.yaml`, custom paths)
 - custom paths per model type
 
@@ -44,11 +45,17 @@ Each update card can show:
 
 - `Model`
 - `Saved` local versions
+- `Metadata only` local versions tracked from `.civitai.info` without a weight file
 - multiple `New` remote versions, sorted by release date descending
 - `File URL`
 
 `Version` means a specific Civitai release.
 `New` uses Civitai release dates: `publishedAt` first, then `createdAt` when `publishedAt` is missing.
+
+A sidecar-only version suppresses that same Civitai version from `New`. It is
+shown only when a later version produces an update card. The sidecar must contain
+valid `modelId` and version `id` fields; preview PNGs alone and invalid sidecars
+are ignored.
 
 ## 7. Hidden updates
 
