@@ -42,6 +42,7 @@ const state = {
   forceNextRecheck: false,
   cachedJobId: null,
   cacheFilesChanged: null,
+  sidecarWarnings: [],
   treatSidecarsAsInstalled: null,
 
   checkJobId: null,
@@ -63,6 +64,7 @@ const state = {
 
   rootEl: null,
   cacheInfoEl: null,
+  sidecarWarningsEl: null,
   statusEl: null,
   progressWrapEl: null,
   progressFillEl: null,
@@ -163,6 +165,7 @@ async function renderTab(el) {
         <button id="cu-scan" class="cu-btn cu-btn-outline cu-tooltip" data-tooltip="Scan files and download/refresh sidecar metadata only (no update comparison).">Scan Metadata Only</button>
       </div>
       <div id="cu-cache-info" class="cu-cache-info"></div>
+      <div id="cu-sidecar-warnings" class="cu-sidecar-warnings"></div>
       <div id="cu-progress-wrap" class="cu-progress-wrap" style="display:none">
         <div class="cu-progress"><div id="cu-progress-fill" class="cu-progress-fill"></div></div>
         <span id="cu-progress-text" class="cu-progress-pct"></span>
@@ -207,6 +210,7 @@ async function renderTab(el) {
 
   state.rootEl = root;
   state.cacheInfoEl = root.querySelector("#cu-cache-info");
+  state.sidecarWarningsEl = root.querySelector("#cu-sidecar-warnings");
   state.statusEl = root.querySelector("#cu-status");
   state.progressWrapEl = root.querySelector("#cu-progress-wrap");
   state.progressFillEl = root.querySelector("#cu-progress-fill");
@@ -227,6 +231,7 @@ async function renderTab(el) {
   state.jobControlsEl = root.querySelector("#cu-job-controls");
   bindEvents(root);
   renderRoots();
+  renderSidecarWarnings();
   renderScanReport();
   renderFilters();
   renderResults();
@@ -242,6 +247,8 @@ async function renderTab(el) {
 async function loadCachedResults() {
   try {
     const resp = await getJson("/civitai-updater/last-check");
+    state.sidecarWarnings = Array.isArray(resp.sidecarWarnings) ? resp.sidecarWarnings : [];
+    renderSidecarWarnings();
     if (!resp.data) {
       if (resp.cacheInvalid) {
         setStatus("Cached results are from an older format. Run Check for Updates again.");
@@ -469,6 +476,10 @@ function pollJob(jobId) {
 
       state.currentJobStatus = status;
       state.currentSummary = job.summary || null;
+      if (Array.isArray(job.summary?.sidecarWarnings)) {
+        state.sidecarWarnings = job.summary.sidecarWarnings;
+        renderSidecarWarnings();
+      }
       state.currentProgress = progress;
       state.currentTotal = total;
       state.currentItemCount = itemCount;
@@ -656,6 +667,38 @@ function renderCacheInfo() {
       startJob("/civitai-updater/jobs/check-updates", "check-updates");
     });
   }
+}
+
+function renderSidecarWarnings() {
+  if (!state.sidecarWarningsEl) return;
+  const warnings = Array.isArray(state.sidecarWarnings) ? state.sidecarWarnings : [];
+  if (!warnings.length) {
+    state.sidecarWarningsEl.innerHTML = "";
+    state.sidecarWarningsEl.style.display = "none";
+    return;
+  }
+
+  const label = `${warnings.length} invalid sidecar${warnings.length === 1 ? "" : "s"} ignored`;
+  const rows = warnings.map((warning) => {
+    const path = String(warning?.path || "");
+    const name = extractFilename(path) || "Unknown sidecar";
+    const message = String(warning?.message || "This sidecar is invalid and was ignored.");
+    return `
+      <div class="cu-sidecar-warning-row">
+        <div class="cu-sidecar-warning-name">${escapeHtml(name)}</div>
+        <div class="cu-sidecar-warning-message">${escapeHtml(message)}</div>
+        <code class="cu-sidecar-warning-path">${escapeHtml(path)}</code>
+      </div>
+    `;
+  }).join("");
+
+  state.sidecarWarningsEl.innerHTML = `
+    <details class="cu-warning-panel">
+      <summary><span aria-hidden="true">⚠</span> ${escapeHtml(label)}</summary>
+      <div class="cu-sidecar-warning-list">${rows}</div>
+    </details>
+  `;
+  state.sidecarWarningsEl.style.display = "";
 }
 
 function renderScanReport() {
@@ -1535,6 +1578,61 @@ function injectStyles() {
     .cu-dirty-details {
       font-size: 11px;
       color: var(--cu-muted);
+    }
+
+    .cu-sidecar-warnings {
+      display: none;
+      margin: 2px 0 8px;
+    }
+
+    .cu-warning-panel {
+      border: 1px solid rgba(243, 166, 56, 0.35);
+      border-radius: 8px;
+      background: rgba(243, 166, 56, 0.08);
+      overflow: hidden;
+    }
+
+    .cu-warning-panel > summary {
+      padding: 7px 9px;
+      color: #ffc96f;
+      cursor: pointer;
+      font-size: 11.5px;
+      font-weight: 650;
+      user-select: none;
+    }
+
+    .cu-sidecar-warning-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      padding: 0 9px 9px;
+    }
+
+    .cu-sidecar-warning-row {
+      border-top: 1px solid rgba(243, 166, 56, 0.2);
+      padding-top: 7px;
+    }
+
+    .cu-sidecar-warning-name {
+      color: #f2f5fa;
+      font-weight: 600;
+      overflow-wrap: anywhere;
+    }
+
+    .cu-sidecar-warning-message {
+      margin-top: 2px;
+      color: #d4b77f;
+      font-size: 11px;
+    }
+
+    .cu-sidecar-warning-path {
+      display: block;
+      margin-top: 4px;
+      color: #8d9bb5;
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      font-size: 9.5px;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
 
     /* ---- Tooltips ---- */

@@ -108,6 +108,7 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
         active = job_manager.get_active()
         if progress_data and active:
             return web.json_response({
+                "sidecarWarnings": active.summary.get("sidecarWarnings", []),
                 "data": {
                     "jobId": active.id,
                     "checkedAt": active.startedAt or "",
@@ -122,18 +123,21 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
 
         cache_path = config_store.data_dir / "last_check.json"
         data = read_json(cache_path)
+        current_paths, sidecar_warnings = updater_service.inspect_current_files()
         if not data:
-            return web.json_response({"data": None})
+            return web.json_response({"data": None, "sidecarWarnings": sidecar_warnings})
         if int(data.get("schemaVersion") or 0) != CACHE_SCHEMA_VERSION:
-            return web.json_response({"data": None, "cacheInvalid": True})
+            return web.json_response(
+                {"data": None, "cacheInvalid": True, "sidecarWarnings": sidecar_warnings}
+            )
         job = job_manager.load_cached_check(data)
 
         cached_paths = {str(item.get("modelPath", "")).lower() for item in data.get("items", []) if item.get("modelPath")}
-        current_paths = updater_service.list_current_file_paths()
         added = len(current_paths - cached_paths)
         removed = len(cached_paths - current_paths)
 
         return web.json_response({
+            "sidecarWarnings": sidecar_warnings,
             "data": {
                 "jobId": job.id,
                 "checkedAt": data.get("checkedAt", ""),
