@@ -198,6 +198,31 @@ class UpdaterServiceErrorTests(unittest.TestCase):
             store.update({"treatSidecarsAsInstalled": False})
             self.assertEqual(set(), service.list_current_file_paths())
 
+    def test_current_file_inspection_returns_non_fatal_sidecar_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "models"
+            root.mkdir()
+            info_path = root / "broken.civitai.info"
+            info_path.write_bytes(b"{\x8f}")
+
+            store = ConfigStore(Path(tmpdir) / "data")
+            store.update(
+                {
+                    "useComfyPaths": False,
+                    "useExtraModelPaths": False,
+                    "useCustomPaths": True,
+                    "customPaths": {"lora": [str(root)]},
+                    "treatSidecarsAsInstalled": True,
+                }
+            )
+
+            paths, warnings = UpdaterService(store).inspect_current_files()
+
+            self.assertEqual(set(), paths)
+            self.assertEqual(1, len(warnings))
+            self.assertEqual(str(info_path), warnings[0]["path"])
+            self.assertEqual("invalid_encoding", warnings[0]["code"])
+
 
 if __name__ == "__main__":
     unittest.main()

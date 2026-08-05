@@ -46,14 +46,21 @@ class UpdaterService:
 
     def list_current_file_paths(self) -> set[str]:
         """Fast filesystem scan — just returns the set of model file paths (no hashing)."""
+        paths, _warnings = self.inspect_current_files()
+        return paths
+
+    def inspect_current_files(self) -> tuple[set[str], list[dict]]:
+        """Return current model paths and non-fatal sidecar discovery warnings."""
         config = self.config_store.get()
         model_types = normalize_model_types(None)
         roots = resolve_model_roots(config, model_types, include_custom_paths=True)
+        sidecar_warnings: list[dict] = []
         files = list_model_files(
             roots,
             include_sidecar_only=bool(config.get("treatSidecarsAsInstalled", True)),
+            sidecar_warnings=sidecar_warnings,
         )
-        return {str(f["path"]).lower() for f in files}
+        return {str(f["path"]).lower() for f in files}, sidecar_warnings
 
     def _run(
         self,
@@ -71,10 +78,12 @@ class UpdaterService:
         request_delay_seconds = max(0.0, int(config.get("requestDelayMs", 120)) / 1000.0)
 
         roots = resolve_model_roots(config, model_types, include_custom_paths=include_custom)
+        sidecar_warnings: list[dict] = []
         files = _dedupe_model_files(
             list_model_files(
                 roots,
                 include_sidecar_only=bool(config.get("treatSidecarsAsInstalled", True)),
+                sidecar_warnings=sidecar_warnings,
             )
         )
         total = len(files)
@@ -165,6 +174,7 @@ class UpdaterService:
                 "errors": stats["errors"],
                 "modelTypes": model_types,
                 "includeCustomPaths": include_custom,
+                "sidecarWarnings": sidecar_warnings,
             }
         else:
             summary = {
@@ -176,6 +186,7 @@ class UpdaterService:
                 "errors": stats["errors"],
                 "modelTypes": model_types,
                 "includeCustomPaths": include_custom,
+                "sidecarWarnings": sidecar_warnings,
             }
         return summary, items
 
