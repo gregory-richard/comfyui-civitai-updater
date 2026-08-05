@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [1.4.1] - 2026-08-05
 
 ### Fixed
 - Invalidly encoded, binary, or implausibly large `.civitai.info` files are ignored instead of aborting model discovery or consuming excessive memory; UTF-8, UTF-16, and UTF-32 sidecars remain supported.
