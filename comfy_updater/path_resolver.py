@@ -9,7 +9,14 @@ from .constants import (
     SUPPORTED_MODEL_EXTENSIONS,
     SUPPORTED_MODEL_TYPES,
 )
-from .sidecar import read_json
+from .sidecar import (
+    SIDECAR_ERROR_INVALID_ENCODING,
+    SIDECAR_ERROR_INVALID_JSON,
+    SIDECAR_ERROR_READ,
+    SIDECAR_ERROR_SAFETENSORS,
+    SIDECAR_ERROR_TOO_LARGE,
+    read_json_diagnostic,
+)
 
 try:
     import folder_paths
@@ -60,6 +67,7 @@ def resolve_model_roots(config: dict, model_types: list[str], include_custom_pat
 def list_model_files(
     roots: dict[str, list[Path]],
     include_sidecar_only: bool = False,
+    sidecar_warnings: list[dict] | None = None,
 ) -> list[dict]:
     files: list[dict] = []
     weight_stems: set[str] = set()
@@ -90,7 +98,7 @@ def list_model_files(
         for model_type, info_path in sidecar_candidates:
             if _info_stem_key(info_path) in weight_stems:
                 continue
-            if not _is_valid_info_sidecar(info_path):
+            if not _is_valid_info_sidecar(info_path, sidecar_warnings):
                 continue
             files.append(
                 {
@@ -118,11 +126,38 @@ def _preview_path_for_info(info_path: Path) -> Path:
     return info_path.with_name(f"{base_name}{PREVIEW_SIDECAR_SUFFIX}")
 
 
-def _is_valid_info_sidecar(info_path: Path) -> bool:
-    payload = read_json(info_path)
+def _is_valid_info_sidecar(info_path: Path, sidecar_warnings: list[dict] | None = None) -> bool:
+    payload, error = read_json_diagnostic(info_path)
+    if error and sidecar_warnings is not None:
+        _append_sidecar_warning(sidecar_warnings, info_path, error)
     if not isinstance(payload, dict):
         return False
     return _has_identifier(payload.get("modelId")) and _has_identifier(payload.get("id"))
+
+
+def _append_sidecar_warning(warnings: list[dict], info_path: Path, error: str) -> None:
+    path = str(info_path)
+    if any(str(warning.get("path", "")).lower() == path.lower() for warning in warnings):
+        return
+
+    messages = {
+        SIDECAR_ERROR_SAFETENSORS: (
+            "This appears to be a SafeTensors model saved with the .civitai.info extension. "
+            "Rename it to use the .safetensors extension."
+        ),
+        SIDECAR_ERROR_TOO_LARGE: "This metadata sidecar is implausibly large and was ignored.",
+        SIDECAR_ERROR_INVALID_ENCODING: "This sidecar is not valid UTF-8, UTF-16, or UTF-32 JSON and was ignored.",
+        SIDECAR_ERROR_INVALID_JSON: "This sidecar contains malformed JSON and was ignored.",
+        SIDECAR_ERROR_READ: "This sidecar could not be read and was ignored.",
+    }
+    warnings.append(
+        {
+            "path": path,
+            "code": error,
+            "message": messages.get(error, "This sidecar is invalid and was ignored."),
+            "suggestedExtension": ".safetensors" if error == SIDECAR_ERROR_SAFETENSORS else "",
+        }
+    )
 
 
 def _has_identifier(value) -> bool:
