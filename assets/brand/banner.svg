@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2100" height="900" viewBox="0 0 2100 900">
+  <rect width="2100" height="900" fill="#131316"/>
+  <g stroke="#2e2e36" stroke-width="1">
+    <line x1="0" y1="196" x2="2100" y2="196"/>
+    <line x1="0" y1="742" x2="2100" y2="742"/>
+    <line x1="1058" y1="196" x2="1058" y2="742"/>
+  </g>
+
+  <!-- the panel's own voice, in the ledger header -->
+  <text x="150" y="124" font-family="IBM Plex Mono, monospace" font-size="19" letter-spacing="2.2"
+        fill="#6a6772">2071 checked<tspan fill="#2e2e36"> &#183; </tspan><tspan fill="#ff4b3e"
+        opacity="0.9">41 updates</tspan><tspan fill="#2e2e36"> &#183; </tspan>180 not found</text>
+
+  <text x="150" y="424" font-family="Space Grotesk, sans-serif" font-size="112" font-weight="700"
+        letter-spacing="12" fill="#eceae4">CIVITAI</text>
+  <text x="150" y="542" font-family="Space Grotesk, sans-serif" font-size="112" font-weight="500"
+        letter-spacing="12" fill="#96939c">UPDATER<tspan fill="#ff4b3e">.</tspan></text>
+  <text x="156" y="620" font-family="IBM Plex Mono, monospace" font-size="22" letter-spacing="2.2"
+        fill="#6a6772">ComfyUI sidebar &#183; knows when your models moved on</text>
+
+  <!-- one model's ledger -->
+  <g transform="translate(1150,0)">
+    <text x="-26" y="278" font-family="Space Grotesk, sans-serif" font-size="26" font-weight="500"
+          fill="#eceae4">Juggernaut XL</text>
+    <text x="186" y="277" font-family="IBM Plex Mono, monospace" font-size="14" letter-spacing="1.6"
+          fill="#6a6772">CHECKPOINT</text>
+    <line x1="0" y1="322" x2="0" y2="696" stroke="#2e2e36" stroke-width="2"/>
+    
+    <circle cx="0" cy="352" r="6.5" fill="#131316" stroke="#b7b4bd" stroke-width="2.5"/>
+    <text x="34" y="358" font-family="IBM Plex Mono, monospace" font-size="16" font-weight="500"
+          letter-spacing="1.6" fill="#6a6772">SAVED</text>
+    <text x="132" y="358" font-family="IBM Plex Mono, monospace" font-size="16"
+          fill="#6a6772">2024-04-19</text>
+    <text x="266" y="358" font-family="IBM Plex Mono, monospace" font-size="15"
+          fill="#6a6772" opacity="0.8">SDXL 1.0</text>
+    <text x="410" y="358" font-family="Space Grotesk, sans-serif" font-size="19"
+          font-weight="400" fill="#96939c">Jugg_X_by RunDiffusion</text>
+    <circle cx="0" cy="452" r="6.5" fill="#131316" stroke="#b7b4bd" stroke-width="2.5"/>
+    <text x="34" y="458" font-family="IBM Plex Mono, monospace" font-size="16" font-weight="500"
+          letter-spacing="1.6" fill="#6a6772">SAVED</text>
+    <text x="132" y="458" font-family="IBM Plex Mono, monospace" font-size="16"
+          fill="#6a6772">2024-04-27</text>
+    <text x="266" y="458" font-family="IBM Plex Mono, monospace" font-size="15"
+          fill="#6a6772" opacity="0.8">SDXL Hyper</text>
+    <text x="410" y="458" font-family="Space Grotesk, sans-serif" font-size="19"
+          font-weight="400" fill="#96939c">Jugg_X_RunDiffusion_Hyper</text>
+    <circle cx="0" cy="566" r="21" fill="#ff4b3e" opacity="0.08"/><circle cx="0" cy="566" r="13" fill="#ff4b3e" opacity="0.18"/><circle cx="0" cy="566" r="7" fill="#ff4b3e"/>
+    <text x="34" y="572" font-family="IBM Plex Mono, monospace" font-size="16" font-weight="500"
+          letter-spacing="1.6" fill="#ff4b3e">NEW</text>
+    <text x="132" y="572" font-family="IBM Plex Mono, monospace" font-size="16"
+          fill="#6a6772">2024-08-29</text>
+    <text x="266" y="572" font-family="IBM Plex Mono, monospace" font-size="15"
+          fill="#6a6772" opacity="0.8">SDXL 1.0</text>
+    <text x="410" y="572" font-family="Space Grotesk, sans-serif" font-size="19"
+          font-weight="500" fill="#ff4b3e">Jugg_XI_by_RunDiffusion</text>
+    <circle cx="0" cy="666" r="21" fill="#ff4b3e" opacity="0.08"/><circle cx="0" cy="666" r="13" fill="#ff4b3e" opacity="0.18"/><circle cx="0" cy="666" r="7" fill="#ff4b3e"/>
+    <text x="34" y="672" font-family="IBM Plex Mono, monospace" font-size="16" font-weight="500"
+          letter-spacing="1.6" fill="#ff4b3e">NEW</text>
+    <text x="132" y="672" font-family="IBM Plex Mono, monospace" font-size="16"
+          fill="#6a6772">2025-05-07</text>
+    <text x="266" y="672" font-family="IBM Plex Mono, monospace" font-size="15"
+          fill="#6a6772" opacity="0.8">SDXL 1.0</text>
+    <text x="410" y="672" font-family="Space Grotesk, sans-serif" font-size="19"
+          font-weight="500" fill="#ff4b3e">Ragnarok</text>
+  </g>
+</svg>
