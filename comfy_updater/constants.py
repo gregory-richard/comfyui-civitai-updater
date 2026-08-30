@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-API_BASE_URL = "https://civitai.com/api/v1"
+# The API must live on civitai.red: since the April 2026 domain split,
+# civitai.com ("green" domain) serves SFW-filtered API responses, so hash
+# lookups for mature models 404 there. civitai.red serves the full catalog.
+API_BASE_URL = "https://civitai.red/api/v1"
 MODEL_PAGE_BASE_URL = "https://civitai.red/models"
 
 VERSION_BY_HASH_URL = f"{API_BASE_URL}/model-versions/by-hash"

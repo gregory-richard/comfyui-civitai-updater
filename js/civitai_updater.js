@@ -24,7 +24,23 @@ const SETTINGS = {
   customLora: "CivitaiUpdater.CustomPaths.Lora",
   customVae: "CivitaiUpdater.CustomPaths.VAE",
   customUnet: "CivitaiUpdater.CustomPaths.UNet",
+  customEmbedding: "CivitaiUpdater.CustomPaths.Embedding",
+  matureMode: "CivitaiUpdater.MatureContent",
 };
+
+const GROUP_OPTIONS = [
+  { value: "none", label: "Nothing", short: "None" },
+  { value: "type", label: "Model type", short: "Type" },
+  { value: "baseFamily", label: "Base model", short: "Base" },
+];
+
+const SORT_OPTIONS = [
+  { value: "name", label: "Name A\u2013Z" },
+  { value: "name-desc", label: "Name Z\u2013A" },
+  { value: "latest-date-desc", label: "Newest release" },
+  { value: "latest-date", label: "Oldest release" },
+  { value: "behind", label: "Furthest behind" },
+];
 
 const state = {
   roots: {},
@@ -60,6 +76,17 @@ const state = {
   filterBases: null,
   showHidden: false,
   sortOrder: "name",
+  groupBy: "type",
+  thenBy: "baseFamily",
+  matureMode: "show",
+  matureHidden: 0,
+  groups: [],
+  collapsed: new Set(),
+  startsMidPrimary: false,
+  startsMidSecondary: false,
+  lastRenderSignature: "",
+  lastPageKey: "",
+  freshPaths: new Set(),
   facets: { modelTypes: [], baseModels: [] },
 
   rootEl: null,
@@ -73,6 +100,7 @@ const state = {
   checkSummaryEl: null,
   filterTypeEl: null,
   filterBaseEl: null,
+  arrangeEl: null,
   showHiddenEl: null,
   resultsEl: null,
   pageInfoEl: null,
@@ -104,6 +132,12 @@ app.registerExtension({
     { id: SETTINGS.customLora, name: "LoRA Paths", type: "text", defaultValue: "", tooltip: "Optional extra LoRA roots. Use ';' or new lines.", category: ["Civitai Updater", "Custom Paths", "LoRA"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.customVae, name: "VAE Paths", type: "text", defaultValue: "", tooltip: "Optional extra VAE roots. Use ';' or new lines.", category: ["Civitai Updater", "Custom Paths", "VAE"], onChange: () => scheduleSettingsSync() },
     { id: SETTINGS.customUnet, name: "UNet Paths", type: "text", defaultValue: "", tooltip: "Optional extra UNet roots. Use ';' or new lines.", category: ["Civitai Updater", "Custom Paths", "UNet"], onChange: () => scheduleSettingsSync() },
+    { id: SETTINGS.customEmbedding, name: "Embedding Paths", type: "text", defaultValue: "", tooltip: "Optional extra embedding roots. Use ';' or new lines.", category: ["Civitai Updater", "Custom Paths", "Embedding"], onChange: () => scheduleSettingsSync() },
+    { id: SETTINGS.matureMode, name: "Mature content", type: "combo", defaultValue: "show", options: [
+        { value: "show", text: "Show everything" },
+        { value: "blur", text: "Blur previews" },
+        { value: "hide", text: "Hide mature models" },
+      ], tooltip: "Blur hides the preview image only \u2014 titles stay readable so you can still identify a model. Hide removes mature models from results and reports how many were left out.", category: ["Civitai Updater", "General", "Mature Content"], onChange: () => { scheduleSettingsSync(); onMatureModeChanged(); } },
   ],
   async setup() {
     injectStyles();
@@ -126,8 +160,8 @@ async function renderTab(el) {
   root.className = "cu-root";
   root.innerHTML = `
     <header class="cu-hero">
-      <div class="cu-hero-title">Civitai</div>
-      <p class="cu-hero-sub">Scan local models and check for newer versions on Civitai</p>
+      <div class="cu-hero-title">Civitai Updater</div>
+      <p class="cu-hero-sub">Your local models, checked against their Civitai releases</p>
     </header>
 
     <section class="cu-card">
@@ -187,13 +221,7 @@ async function renderTab(el) {
       <div class="cu-filters">
         <div id="cu-filter-type" class="cu-filter-slot"></div>
         <div id="cu-filter-base" class="cu-filter-slot"></div>
-        <select id="cu-sort" title="Sort results">
-          <option value="name">Name A\u2013Z</option>
-          <option value="name-desc">Name Z\u2013A</option>
-          <option value="type">Type</option>
-          <option value="latest-date-desc">Newest first</option>
-          <option value="latest-date">Oldest first</option>
-        </select>
+        <div id="cu-arrange-slot" class="cu-filter-slot"></div>
         <label class="cu-toggle" title="Show versions you previously hid">
           <input id="cu-show-hidden" type="checkbox">
           <span>Show hidden</span>
@@ -219,6 +247,7 @@ async function renderTab(el) {
   state.checkSummaryEl = root.querySelector("#cu-check-summary");
   state.filterTypeEl = root.querySelector("#cu-filter-type");
   state.filterBaseEl = root.querySelector("#cu-filter-base");
+  state.arrangeEl = root.querySelector("#cu-arrange-slot");
   state.showHiddenEl = root.querySelector("#cu-show-hidden");
   state.resultsEl = root.querySelector("#cu-results");
   state.pageInfoEl = root.querySelector("#cu-page");
@@ -231,6 +260,7 @@ async function renderTab(el) {
   state.jobControlsEl = root.querySelector("#cu-job-controls");
   bindEvents(root);
   renderRoots();
+  renderArrange();
   renderSidecarWarnings();
   renderScanReport();
   renderFilters();
@@ -246,6 +276,26 @@ async function renderTab(el) {
 
 async function loadCachedResults() {
   try {
+    // Reconnect to any job that is still running server-side (scan or
+    // check) so a page reload keeps progress and the pause/stop controls.
+    const activeResp = await getJson("/civitai-updater/jobs/active").catch(() => ({ job: null }));
+    if (activeResp.job) {
+      state.currentJobId = activeResp.job.jobId;
+      state.currentJobType = activeResp.job.type;
+      state.currentJobStatus = activeResp.job.status;
+      state.currentProgress = activeResp.job.progress || 0;
+      state.currentTotal = activeResp.job.total || 0;
+      state.currentItemCount = activeResp.job.itemCount || 0;
+      if (activeResp.job.type === "check-updates") {
+        state.checkJobId = activeResp.job.jobId;
+      }
+      updateProgress(state.currentProgress, state.currentTotal, true);
+      updateControlButtons();
+      setStatus(`Reconnected \u2014 ${activeResp.job.message || "running"}`);
+      pollJob(activeResp.job.jobId);
+      return;
+    }
+
     const resp = await getJson("/civitai-updater/last-check");
     state.sidecarWarnings = Array.isArray(resp.sidecarWarnings) ? resp.sidecarWarnings : [];
     renderSidecarWarnings();
@@ -257,23 +307,6 @@ async function loadCachedResults() {
     }
 
     if (resp.data.inProgress) {
-      const activeResp = await getJson("/civitai-updater/jobs/active");
-      if (activeResp.job) {
-        state.currentJobId = activeResp.job.jobId;
-        state.currentJobType = activeResp.job.type;
-        state.currentJobStatus = activeResp.job.status;
-        state.currentProgress = activeResp.job.progress || 0;
-        state.currentTotal = activeResp.job.total || 0;
-        state.currentItemCount = activeResp.job.itemCount || 0;
-        if (activeResp.job.type === "check-updates") {
-          state.checkJobId = activeResp.job.jobId;
-        }
-        updateProgress(state.currentProgress, state.currentTotal, true);
-        updateControlButtons();
-        setStatus(`Reconnected \u2014 ${activeResp.job.message || "running"}`);
-        pollJob(activeResp.job.jobId);
-        return;
-      }
       setStatus("Previous check was interrupted. Run Check for Updates again.");
       return;
     }
@@ -311,9 +344,22 @@ function bindEvents(root) {
     state.pageOffset = 0;
     await loadResultPage(true);
   });
-  root.querySelector("#cu-sort").addEventListener("change", async (ev) => {
-    state.sortOrder = ev.target.value;
+  root.addEventListener("change", async (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLSelectElement)) return;
+    const key = target.dataset.arrange;
+    if (!key) return;
+    if (key === "sort") {
+      state.sortOrder = target.value;
+    } else if (key === "groupBy") {
+      state.groupBy = target.value;
+      if (state.thenBy === state.groupBy) state.thenBy = "none";
+    } else if (key === "thenBy") {
+      state.thenBy = target.value;
+    }
     state.pageOffset = 0;
+    state.collapsed.clear();
+    renderArrange();
     await loadResultPage(true);
   });
   root.querySelector("#cu-show-hidden").addEventListener("change", async (ev) => {
@@ -363,6 +409,16 @@ function bindEvents(root) {
       const versionId = target.dataset.versionId || "";
       if (!modelId || !versionId) return;
       await toggleArchivedUpdate(modelId, versionId, target.dataset.archiveAction === "restore");
+      return;
+    }
+    const groupHead = target.closest("[data-group-key]");
+    if (groupHead) {
+      const key = groupHead.dataset.groupKey || "";
+      if (!key) return;
+      if (state.collapsed.has(key)) state.collapsed.delete(key);
+      else state.collapsed.add(key);
+      state.pageOffset = 0;
+      await loadResultPage(true);
     }
   });
 }
@@ -432,6 +488,10 @@ async function startJob(endpoint, type) {
     updateControlButtons();
     setStatus(type === "check-updates" ? "Scanning files and checking updates\u2026" : "Scanning files and refreshing metadata\u2026");
     pollJob(data.jobId);
+    if (type === "check-updates") {
+      // The job is seeded with the previous results \u2014 show them right away.
+      await loadResultPage(true);
+    }
   } catch (error) {
     setStatus(`Failed to start job: ${error.message}`);
   }
@@ -492,6 +552,12 @@ function pollJob(jobId) {
 
       if (state.currentJobType === "check-updates") {
         if (job.summary && Object.keys(job.summary).length > 0) state.checkSummary = job.summary;
+        if (countChanged) {
+          for (const item of state.resultItems) {
+            const path = (item.localVersions || [])[0]?.modelPath || "";
+            if (path && item.isProvisional) state.freshPaths.add(String(path).toLowerCase());
+          }
+        }
         const onPage1 = state.pageOffset === 0;
         const running = status === "running" || status === "queued" || status === "paused";
         if ((statusChanged || countChanged || (running && onPage1)) && isTabVisible()) await loadResultPage(false);
@@ -587,15 +653,23 @@ async function loadResultPage(force) {
       mode: "updates",
       sort: state.sortOrder || "name",
       showHidden: state.showHidden ? "1" : "0",
+      groupBy: state.groupBy || "none",
+      thenBy: state.thenBy || "none",
+      mature: state.matureMode || "show",
     });
     for (const modelType of state.filterTypes || []) query.append("modelType", modelType);
     for (const baseModel of state.filterBases || []) query.append("baseModel", baseModel);
+    for (const key of state.collapsed) query.append("collapsed", key);
     const data = await getJson(`/civitai-updater/jobs/${state.checkJobId}/items?${query.toString()}`);
     if (requestSeq !== state.resultRequestSeq) return;
     state.resultItems = Array.isArray(data.items) ? data.items : [];
     state.resultTotal = Number(data.totalItems || 0);
     state.resultOffset = Number(data.offset || 0);
     state.pageOffset = state.resultOffset;
+    state.groups = Array.isArray(data.groups) ? data.groups : [];
+    state.startsMidPrimary = Boolean(data.startsMidPrimary);
+    state.startsMidSecondary = Boolean(data.startsMidSecondary);
+    state.matureHidden = Number(data.matureHidden || 0);
     if (data.facets) {
       applyFacets(data.facets);
       renderFilters();
@@ -611,6 +685,16 @@ async function loadResultPage(force) {
   }
 }
 
+function summaryLine(s) {
+  // Only counts that carry information: a zero for hidden/not-found/errors is
+  // noise, and dropping it keeps the line on one row in a narrow sidebar.
+  const parts = [`${s.total || 0} checked`, `${s.withUpdates || 0} updates`];
+  if (s.hiddenUpdates) parts.push(`${s.hiddenUpdates} hidden`);
+  if (s.notFound) parts.push(`${s.notFound} not found`);
+  if (s.errors) parts.push(`${s.errors} errors`);
+  return parts.join(" \u00b7 ");
+}
+
 function renderProgressCounts() {
   if (!state.statusEl) return;
   const s = state.currentSummary;
@@ -624,8 +708,7 @@ function renderProgressCounts() {
     state.statusEl.textContent = `Scan: ${s.total || 0} total \u00b7 ${s.refreshed || 0} refreshed \u00b7 ${s.skipped || 0} skipped \u00b7 ${s.errors || 0} errors`;
     return;
   }
-  const hidden = s.hiddenUpdates ? ` \u00b7 ${s.hiddenUpdates} hidden` : "";
-  state.statusEl.textContent = `${s.total || 0} checked \u00b7 ${s.withUpdates || 0} updates${hidden} \u00b7 ${s.notFound || 0} not found \u00b7 ${s.errors || 0} errors`;
+  state.statusEl.textContent = summaryLine(s);
 }
 
 function renderCacheInfo() {
@@ -644,12 +727,16 @@ function renderCacheInfo() {
   let detailsText = "";
   if (dirty) {
     const parts = [];
-    if (dirty.added) parts.push(`${dirty.added} added`);
-    if (dirty.removed) parts.push(`${dirty.removed} removed`);
+    if (typeof dirty === "object") {
+      if (dirty.added) parts.push(`${dirty.added} added`);
+      if (dirty.removed) parts.push(`${dirty.removed} removed`);
+    }
     const details = parts.join(", ");
-    const tooltipText = `Models changed on your disk (${details}). Re-check is recommended to sync changes.`;
+    const tooltipText = details
+      ? `Models changed on your disk (${details}). Re-check is recommended to sync changes.`
+      : "Tracked models changed. Re-check is recommended to sync changes.";
     statusPill = `<span class="cu-status-pill cu-tooltip" data-status="dirty" data-tooltip="${escapeHtml(tooltipText)}">changes detected</span>`;
-    detailsText = ` <span class="cu-dirty-details">(${escapeHtml(details)})</span>`;
+    detailsText = details ? ` <span class="cu-dirty-details">(${escapeHtml(details)})</span>` : "";
   } else if (fresh) {
     statusPill = `<span class="cu-status-pill cu-tooltip" data-status="cached" data-tooltip="Results are fresh and cached. Will remain cached for up to ${ttl} minutes since last check.">cached</span>`;
   } else {
@@ -713,15 +800,145 @@ function renderScanReport() {
   state.scanReportEl.innerHTML = `<div class="cu-small"><strong>Last Scan</strong> \u00b7 ${s.total || 0} total \u00b7 ${s.refreshed || 0} refreshed \u00b7 ${s.skipped || 0} skipped \u00b7 ${s.errors || 0} errors<br>${escapeHtml(state.scanHint || "")}</div>`;
 }
 
+function buildResultCard(item, cardIndex) {
+  const card = document.createElement("article");
+  card.className = "cu-item";
+  card.style.setProperty("--cu-i", String(Math.min(cardIndex, 12)));
+  if (item.nsfw && state.matureMode === "blur") card.dataset.mature = "blur";
+  const path = (item.localVersions || [])[0]?.modelPath || "";
+  if (path && state.freshPaths.has(String(path).toLowerCase())) {
+    card.classList.add("cu-settled");
+    state.freshPaths.delete(String(path).toLowerCase());
+  }
+  const localVersions = item.localVersions || [];
+  const newVersions = item.newVersions || [];
+  const hiddenVersions = state.showHidden ? (item.hiddenNewVersions || []) : [];
+  const firstPath = localVersions.length ? localVersions[0].modelPath : "";
+  const displayName = item.modelName ? escapeHtml(item.modelName) : escapeHtml(extractFilename(firstPath || "unknown"));
+
+  const typePill = item.modelType ? `<span class="cu-type-pill" data-type="${escapeHtml(item.modelType)}">${escapeHtml(capitalize(item.modelType))}</span>` : "";
+  const creatorHtml = item.creatorName ? `<span class="cu-creator">by ${escapeHtml(item.creatorName)}</span>` : "";
+  const provisionalHtml = item.isProvisional ? `<span class="cu-provisional">Provisional</span>` : "";
+
+  const localRows = localVersions.map((v) => {
+    const date = v.publishedAt ? shortDate(v.publishedAt) : "";
+    const localRole = v.metadataOnly ? "metadata" : "saved";
+    const localLabel = v.metadataOnly ? "Metadata" : "Saved";
+    return `
+      <div class="cu-ver-row">
+        <span class="cu-ver-label" data-role="${localRole}">${localLabel}</span>
+        <span class="cu-ver-date">${escapeHtml(date || "—")}</span>
+        <span class="cu-ver-base">${escapeHtml(v.baseModel || "—")}</span>
+        <span class="cu-ver-main">
+          <span class="cu-ver-link cu-copy-path" data-path="${escapeHtml(v.modelPath || "")}" title="Click to copy file path">${escapeHtml(v.versionName || "?")}</span>
+        </span>
+      </div>`;
+  }).join("");
+
+  const newRows = newVersions.map((v) => renderRemoteVersionRow(item.modelId, v, false)).join("");
+  const hiddenRows = hiddenVersions.map((v) => renderRemoteVersionRow(item.modelId, v, true)).join("");
+
+  let thumbHtml;
+  if (item.previewUrl && item.previewType === "video") {
+    thumbHtml = `<video src="${escapeHtml(item.previewUrl)}#t=0.5" preload="metadata" muted playsinline></video>`;
+  } else if (item.previewUrl) {
+    thumbHtml = `<img src="${escapeHtml(item.previewUrl)}" alt="" loading="lazy">`;
+  } else {
+    thumbHtml = `<div class="cu-thumb-empty">No preview</div>`;
+  }
+
+  card.innerHTML = `
+    <div class="cu-thumb">${thumbHtml}</div>
+    <div class="cu-item-body">
+      <div class="cu-item-header">
+        <div class="cu-ver-row cu-ver-row-model">
+          <span class="cu-ver-label cu-ver-label-model">${typePill || "<span></span>"}</span>
+          <span class="cu-ver-date"></span>
+          <span class="cu-ver-base"></span>
+          <div class="cu-ver-main">
+            <h4 title="${escapeHtml(firstPath)}">${displayName}</h4>
+            ${creatorHtml}
+            ${provisionalHtml}
+          </div>
+        </div>
+      </div>
+      <div class="cu-versions">
+        ${localRows}
+        ${newRows}
+        ${hiddenRows}
+      </div>
+    </div>`;
+  for (const el of card.querySelectorAll(".cu-copy-path")) {
+    el.addEventListener("click", (e) => {
+      const target = e.currentTarget;
+      const path = target.dataset.path || "";
+      const original = target.textContent;
+      navigator.clipboard.writeText(path).then(() => {
+        target.textContent = "Copied!";
+        setTimeout(() => { target.textContent = original; }, 1500);
+      }).catch(() => {
+        target.textContent = "Failed";
+        setTimeout(() => { target.textContent = original; }, 1500);
+      });
+    });
+  }
+  card.querySelector(".cu-thumb").addEventListener("click", () => openLightbox(item));
+  return card;
+}
+
+function resultsSignature() {
+  // Everything that changes what the list looks like, and nothing that does not.
+  return JSON.stringify([
+    state.checkJobId, state.resultOffset, state.resultTotal, state.pageSize,
+    state.groupBy, state.thenBy, state.sortOrder, state.matureMode,
+    state.showHidden, state.matureHidden,
+    [...state.collapsed].sort(),
+    (state.groups || []).map((g) => [g.key, g.models, g.releases,
+      (g.subgroups || []).map((sub) => [sub.key, sub.models, sub.releases])]),
+    state.resultItems.map((item) => [
+      item.modelId, item.groupPathKey, item.isProvisional ? 1 : 0,
+      (item.newVersions || []).length, (item.hiddenNewVersions || []).length,
+      (item.localVersions || []).length, item.previewUrl,
+    ]),
+  ]);
+}
+
+function resultsPageKey() {
+  // Identity of *which* page this is, so a mere content refresh does not
+  // replay the entry animation.
+  // Collapsing is deliberately absent: folding one band away should not make
+  // every remaining card animate in again.
+  return [state.checkJobId, state.resultOffset, state.pageSize, state.groupBy,
+    state.thenBy, state.sortOrder, state.matureMode, state.showHidden,
+    (state.filterTypes || []).join(","), (state.filterBases || []).join(",")].join("|");
+}
+
 function renderResults() {
   if (!state.resultsEl || !state.checkSummaryEl) return;
   if (state.checkSummary) {
     const s = state.checkSummary;
-    const hidden = s.hiddenUpdates ? ` \u00b7 ${s.hiddenUpdates} hidden` : "";
-    state.checkSummaryEl.textContent = `${s.total || 0} checked \u00b7 ${s.withUpdates || 0} updates${hidden} \u00b7 ${s.notFound || 0} not found \u00b7 ${s.errors || 0} errors`;
+    state.checkSummaryEl.textContent = summaryLine(s);
+  } else if (state.currentJobType === "check-updates") {
+    state.checkSummaryEl.textContent = state.resultItems.length
+      ? "Check in progress \u2014 previous results are shown until each model is re-checked."
+      : "Check in progress\u2026";
   } else {
     state.checkSummaryEl.textContent = "No update check has run yet.";
   }
+  // A check job polls every 800ms; without this the whole list is torn down
+  // and rebuilt each tick, which replays the entry animation and makes the
+  // panel look like it is flickering.
+  const signature = resultsSignature();
+  const pageKey = resultsPageKey();
+  if (signature === state.lastRenderSignature && state.resultsEl.childElementCount) {
+    renderPagination();
+    return;
+  }
+  const samePage = pageKey === state.lastPageKey;
+  state.lastRenderSignature = signature;
+  state.lastPageKey = pageKey;
+  state.resultsEl.classList.toggle("cu-quiet", samePage);
+
   state.resultsEl.innerHTML = "";
   if (!state.checkJobId) {
     appendEmpty("Run Check for Updates to see results.");
@@ -739,93 +956,150 @@ function renderResults() {
     renderPagination();
     return;
   }
+  // Bands are rendered from the outline rather than from the items, so a
+  // collapsed band keeps its header - and with it, the way back.
+  const byPrimary = new Map();
   for (const item of state.resultItems) {
-    const card = document.createElement("article");
-    card.className = "cu-item";
-    const localVersions = item.localVersions || [];
-    const newVersions = item.newVersions || [];
-    const hiddenVersions = state.showHidden ? (item.hiddenNewVersions || []) : [];
-    const firstPath = localVersions.length ? localVersions[0].modelPath : "";
-    const displayName = item.modelName ? escapeHtml(item.modelName) : escapeHtml(extractFilename(firstPath || "unknown"));
-
-    const typePill = item.modelType ? `<span class="cu-type-pill" data-type="${escapeHtml(item.modelType)}">${escapeHtml(capitalize(item.modelType))}</span>` : "";
-    const creatorHtml = item.creatorName ? `<span class="cu-creator">by ${escapeHtml(item.creatorName)}</span>` : "";
-    const provisionalHtml = item.isProvisional ? `<span class="cu-provisional">Provisional</span>` : "";
-
-    const localRows = localVersions.map((v) => {
-      const date = v.publishedAt ? shortDate(v.publishedAt) : "";
-      const localRole = v.metadataOnly ? "metadata" : "saved";
-      const localLabel = v.metadataOnly ? "Metadata only" : "Saved";
-      return `
-        <div class="cu-ver-row">
-          <span class="cu-ver-label" data-role="${localRole}">${localLabel}</span>
-          <span class="cu-ver-date">${escapeHtml(date || "—")}</span>
-          <span class="cu-ver-base">${escapeHtml(v.baseModel || "—")}</span>
-          <span class="cu-ver-main">
-            <span class="cu-ver-link cu-copy-path" data-path="${escapeHtml(v.modelPath || "")}" title="Click to copy file path">${escapeHtml(v.versionName || "?")}</span>
-          </span>
-        </div>`;
-    }).join("");
-
-    const newRows = newVersions.map((v) => renderRemoteVersionRow(item.modelId, v, false)).join("");
-    const hiddenRows = hiddenVersions.map((v) => renderRemoteVersionRow(item.modelId, v, true)).join("");
-
-    let thumbHtml;
-    if (item.previewUrl && item.previewType === "video") {
-      thumbHtml = `<video src="${escapeHtml(item.previewUrl)}#t=0.5" preload="metadata" muted playsinline></video>`;
-    } else if (item.previewUrl) {
-      thumbHtml = `<img src="${escapeHtml(item.previewUrl)}" alt="" loading="lazy">`;
-    } else {
-      thumbHtml = `<div class="cu-thumb-empty">No preview</div>`;
-    }
-
-    card.innerHTML = `
-      <div class="cu-thumb">${thumbHtml}</div>
-      <div class="cu-item-body">
-        <div class="cu-item-header">
-          <div class="cu-ver-row cu-ver-row-model">
-            <span class="cu-ver-label cu-ver-label-model">${typePill || "<span></span>"}</span>
-            <span class="cu-ver-date"></span>
-            <span class="cu-ver-base"></span>
-            <div class="cu-ver-main">
-              <h4 title="${escapeHtml(firstPath)}">${displayName}</h4>
-              ${creatorHtml}
-              ${provisionalHtml}
-            </div>
-          </div>
-        </div>
-        <div class="cu-versions">
-          ${localRows}
-          ${newRows}
-          ${hiddenRows}
-        </div>
-      </div>`;
-    for (const el of card.querySelectorAll(".cu-copy-path")) {
-      el.addEventListener("click", (e) => {
-        const target = e.currentTarget;
-        const path = target.dataset.path || "";
-        const original = target.textContent;
-        navigator.clipboard.writeText(path).then(() => {
-          target.textContent = "Copied!";
-          setTimeout(() => { target.textContent = original; }, 1500);
-        }).catch(() => {
-          target.textContent = "Failed";
-          setTimeout(() => { target.textContent = original; }, 1500);
-        });
-      });
-    }
-    card.querySelector(".cu-thumb").addEventListener("click", () => openLightbox(item));
-    state.resultsEl.appendChild(card);
+    const primaryKey = item.groupPrimaryKey || "";
+    const pathKey = item.groupPathKey || "";
+    if (!byPrimary.has(primaryKey)) byPrimary.set(primaryKey, new Map());
+    const buckets = byPrimary.get(primaryKey);
+    if (!buckets.has(pathKey)) buckets.set(pathKey, []);
+    buckets.get(pathKey).push(item);
   }
+
+  let cardIndex = 0;
+  const appendCard = (item) => {
+    cardIndex += 1;
+    state.resultsEl.appendChild(buildResultCard(item, cardIndex));
+  };
+
+  if (state.groupBy === "none") {
+    for (const item of state.resultItems) appendCard(item);
+  } else {
+    let firstBand = true;
+    for (const group of state.groups || []) {
+      const collapsed = state.collapsed.has(group.key);
+      const buckets = byPrimary.get(group.key);
+      const hasCards = Boolean(buckets && buckets.size);
+      // A band whose cards all sit on another page is not on this one.
+      if (!hasCards && !collapsed) continue;
+
+      const continued = firstBand && hasCards && state.startsMidPrimary;
+      state.resultsEl.appendChild(renderGroupHead(group, collapsed, continued));
+      firstBand = false;
+      if (collapsed) continue;
+
+      if (state.thenBy === "none") {
+        for (const item of (buckets && buckets.get(group.key)) || []) appendCard(item);
+        continue;
+      }
+
+      let firstSub = true;
+      for (const sub of group.subgroups || []) {
+        const subCollapsed = state.collapsed.has(sub.key);
+        const list = (buckets && buckets.get(sub.key)) || [];
+        if (!list.length && !subCollapsed) continue;
+        const subContinued = firstSub && list.length > 0 && state.startsMidSecondary;
+        state.resultsEl.appendChild(renderSubgroupHead(sub, subCollapsed, subContinued));
+        firstSub = false;
+        if (subCollapsed) continue;
+        for (const item of list) appendCard(item);
+      }
+    }
+  }
+
+  renderMatureNotice();
   renderPagination();
+}
+
+function countLabel(models, releases) {
+  const modelWord = models === 1 ? "model" : "models";
+  return `${models} ${modelWord} \u00b7 <b>${releases} new</b>`;
+}
+
+function renderGroupHead(group, collapsed, continued) {
+  const wrap = document.createElement("div");
+  wrap.className = "cu-group-head-wrap";
+  wrap.innerHTML = `
+    <button class="cu-group-head" data-group-key="${escapeHtml(group.key)}"
+            data-collapsed="${collapsed ? "true" : "false"}" aria-expanded="${collapsed ? "false" : "true"}">
+      <span class="cu-group-caret" aria-hidden="true">\u25be</span>
+      <span class="cu-group-name">${escapeHtml(group.label || "Ungrouped")}</span>
+      ${continued ? '<span class="cu-group-cont">cont.</span>' : ""}
+      <span class="cu-group-count">${countLabel(group.models, group.releases)}</span>
+    </button>`;
+  return wrap;
+}
+
+function renderSubgroupHead(sub, collapsed, continued) {
+  const wrap = document.createElement("div");
+  wrap.className = "cu-subgroup-head-wrap";
+  wrap.innerHTML = `
+    <button class="cu-subgroup-head" data-group-key="${escapeHtml(sub.key)}"
+            data-collapsed="${collapsed ? "true" : "false"}" aria-expanded="${collapsed ? "false" : "true"}">
+      <span class="cu-group-caret" aria-hidden="true">\u25be</span>
+      <span class="cu-subgroup-name">${escapeHtml(sub.label || "Unknown")}</span>
+      ${continued ? '<span class="cu-group-cont">cont.</span>' : ""}
+      <span class="cu-subgroup-count">${countLabel(sub.models, sub.releases)}</span>
+    </button>`;
+  return wrap;
+}
+
+function renderMatureNotice() {
+  if (!state.resultsEl || state.matureMode !== "hide" || !state.matureHidden) return;
+  const note = document.createElement("div");
+  note.className = "cu-mature-note";
+  const word = state.matureHidden === 1 ? "model" : "models";
+  note.textContent = `${state.matureHidden} mature ${word} hidden \u2014 change this in Settings \u2192 Civitai Updater.`;
+  state.resultsEl.appendChild(note);
+}
+
+function renderArrange() {
+  if (!state.arrangeEl) return;
+  const groupShort = GROUP_OPTIONS.find((o) => o.value === state.groupBy)?.short || "None";
+  const thenShort = GROUP_OPTIONS.find((o) => o.value === state.thenBy)?.short || "None";
+  const summary = state.groupBy === "none"
+    ? "None"
+    : (state.thenBy === "none" ? groupShort : `${groupShort} \u2192 ${thenShort}`);
+  const options = (list, selected, disabled) => list
+    .map((o) => `<option value="${o.value}"${o.value === selected ? " selected" : ""}${disabled === o.value && o.value !== "none" ? " disabled" : ""}>${escapeHtml(o.label)}</option>`)
+    .join("");
+  const wasOpen = Boolean(state.arrangeEl.querySelector("details[open]"));
+  state.arrangeEl.innerHTML = `
+    <details class="cu-filter-menu cu-arrange"${wasOpen ? " open" : ""}>
+      <summary title="Group and sort the results">${controlSummary("Arrange", summary)}</summary>
+      <div class="cu-filter-panel cu-arrange-panel">
+        <div class="cu-arrange-row"><label>Group</label>
+          <select data-arrange="groupBy">${options(GROUP_OPTIONS, state.groupBy)}</select></div>
+        <div class="cu-arrange-row"><label>Then</label>
+          <select data-arrange="thenBy"${state.groupBy === "none" ? " disabled" : ""}>${options(GROUP_OPTIONS, state.thenBy, state.groupBy)}</select></div>
+        <div class="cu-arrange-row"><label>Sort</label>
+          <select data-arrange="sort">${options(SORT_OPTIONS, state.sortOrder)}</select></div>
+      </div>
+    </details>`;
+}
+
+function onMatureModeChanged() {
+  const next = String(getSetting(SETTINGS.matureMode, "show") || "show");
+  if (next === state.matureMode) return;
+  state.matureMode = next;
+  state.pageOffset = 0;
+  loadResultPage(true);
 }
 
 function renderFilters() {
   if (!state.filterTypeEl || !state.filterBaseEl) return;
   syncFacetSelection("filterTypes", "modelTypes");
   syncFacetSelection("filterBases", "baseModels");
+  // Re-rendering replaces the <details> menus; keep them open across a
+  // re-render so toggling one checkbox doesn't collapse the dropdown.
+  const typeOpen = Boolean(state.filterTypeEl.querySelector("details[open]"));
+  const baseOpen = Boolean(state.filterBaseEl.querySelector("details[open]"));
   state.filterTypeEl.innerHTML = renderFilterMenu("type", "Types", state.facets.modelTypes, state.filterTypes, true);
   state.filterBaseEl.innerHTML = renderFilterMenu("base", "Bases", state.facets.baseModels, state.filterBases, false);
+  if (typeOpen) state.filterTypeEl.querySelector("details")?.setAttribute("open", "");
+  if (baseOpen) state.filterBaseEl.querySelector("details")?.setAttribute("open", "");
   if (state.showHiddenEl) state.showHiddenEl.checked = Boolean(state.showHidden);
 }
 
@@ -875,10 +1149,13 @@ function renderRemoteVersionRow(modelId, version, hidden) {
     </div>`;
 }
 
+const AVAILABILITY_SHORT = { EarlyAccess: "Early", Private: "Private", Unsearchable: "Unlisted" };
+
 function renderAvailabilityBadge(availability) {
   if (!availability || availability === "Public") return "";
   const label = formatAvailability(availability);
-  return `<span class="cu-access-badge" data-availability="${escapeHtml(availability)}" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
+  const short = AVAILABILITY_SHORT[availability] || label;
+  return `<span class="cu-access-badge" data-availability="${escapeHtml(availability)}" title="${escapeHtml(label)}">${escapeHtml(short)}</span>`;
 }
 
 function formatAvailability(value) {
@@ -886,9 +1163,14 @@ function formatAvailability(value) {
   return String(value).replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 
+function controlSummary(label, value) {
+  return `<span class="cu-ctl-label">${escapeHtml(label)}</span>`
+    + `<span class="cu-ctl-value">${escapeHtml(value)}</span>`;
+}
+
 function renderFilterMenu(kind, label, options, selected, capitalizeValues) {
   const active = selected || [];
-  const summary = filterSummary(label, options, selected);
+  const summary = filterSummary(options, selected, capitalizeValues);
   const entries = options.map((value) => {
     const checked = active.includes(value) ? " checked" : "";
     const title = capitalizeValues ? capitalize(value) : value;
@@ -896,7 +1178,7 @@ function renderFilterMenu(kind, label, options, selected, capitalizeValues) {
   }).join("");
   return `
     <details class="cu-filter-menu">
-      <summary>${escapeHtml(summary)}</summary>
+      <summary>${controlSummary(label, summary)}</summary>
       <div class="cu-filter-panel">
         <div class="cu-filter-actions">
           <button class="cu-text-btn" data-filter-action="all" data-filter-kind="${kind}" type="button">Select all</button>
@@ -909,13 +1191,12 @@ function renderFilterMenu(kind, label, options, selected, capitalizeValues) {
     </details>`;
 }
 
-function filterSummary(label, options, selected) {
+function filterSummary(options, selected, capitalizeValues) {
   const active = selected || [];
-  if (!options.length) return `${label}: none`;
-  if (active.length === 0) return `${label}: none`;
-  if (active.length === options.length) return `${label}: all`;
-  if (active.length === 1) return `${label}: ${label === "Types" ? capitalize(active[0]) : active[0]}`;
-  return `${label}: ${active.length} selected`;
+  if (!options.length || active.length === 0) return "none";
+  if (active.length === options.length) return "all";
+  if (active.length === 1) return capitalizeValues ? capitalize(active[0]) : active[0];
+  return `${active.length} selected`;
 }
 
 function syncFacetSelection(selectionKey, facetKey) {
@@ -1046,6 +1327,9 @@ async function hydrateSettingsFromBackend() {
     setSetting(SETTINGS.customLora, listToSettingString(custom.lora));
     setSetting(SETTINGS.customVae, listToSettingString(custom.vae));
     setSetting(SETTINGS.customUnet, listToSettingString(custom.unet));
+    setSetting(SETTINGS.customEmbedding, listToSettingString(custom.embedding));
+    state.matureMode = String(cfg.matureMode || "show");
+    setSetting(SETTINGS.matureMode, state.matureMode);
     state.roots = data.effectiveRoots || {};
   } catch (error) {
     console.warn("Civitai updater: failed to hydrate settings", error);
@@ -1071,6 +1355,7 @@ async function syncSettingsToBackend() {
     maxRetries: Number(getSetting(SETTINGS.maxRetries, 4)),
     requestDelayMs: Number(getSetting(SETTINGS.requestDelayMs, 120)),
     treatSidecarsAsInstalled,
+    matureMode: String(getSetting(SETTINGS.matureMode, "show") || "show"),
     useComfyPaths: Boolean(getSetting(SETTINGS.useComfyPaths, true)),
     useExtraModelPaths: Boolean(getSetting(SETTINGS.useExtraModelPaths, true)),
     useCustomPaths: Boolean(getSetting(SETTINGS.useCustomPaths, true)),
@@ -1079,6 +1364,7 @@ async function syncSettingsToBackend() {
       lora: parsePathSetting(getSetting(SETTINGS.customLora, "")),
       vae: parsePathSetting(getSetting(SETTINGS.customVae, "")),
       unet: parsePathSetting(getSetting(SETTINGS.customUnet, "")),
+      embedding: parsePathSetting(getSetting(SETTINGS.customEmbedding, "")),
     },
   };
   if (apiKeyVal !== "***HIDDEN***") {
@@ -1177,7 +1463,7 @@ function openLightbox(item) {
     const media = primaryNewVersion.previewType === "video"
       ? `<video src="${escapeHtml(primaryNewVersion.previewUrl)}" preload="auto" muted playsinline controls></video>`
       : `<img src="${escapeHtml(primaryNewVersion.previewUrl)}" alt="">`;
-    sections += `<div class="cu-lb-card"><div class="cu-lb-label">Newest Candidate</div><div class="cu-lb-vname">${escapeHtml(primaryNewVersion.versionName || "?")}${latestBase}</div>${media}</div>`;
+    sections += `<div class="cu-lb-card"><div class="cu-lb-label" data-role="new">Newest release</div><div class="cu-lb-vname">${escapeHtml(primaryNewVersion.versionName || "?")}${latestBase}</div>${media}</div>`;
   }
 
   const overlay = document.createElement("div");
@@ -1212,7 +1498,7 @@ function closeLightbox() {
 
 async function getJson(path) {
   const response = await api.fetchApi(path);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) throw new Error(await errorMessage(response));
   return response.json();
 }
 
@@ -1222,8 +1508,18 @@ async function postJson(path, payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) throw new Error(await errorMessage(response));
   return response.json();
+}
+
+async function errorMessage(response) {
+  try {
+    const data = await response.json();
+    if (data && typeof data.error === "string" && data.error) return data.error;
+  } catch (_) {
+    // fall through to the generic status message
+  }
+  return `HTTP ${response.status}`;
 }
 
 function injectStyles() {
@@ -1231,6 +1527,8 @@ function injectStyles() {
   const style = document.createElement("style");
   style.id = "cu-styles";
   style.textContent = `
+    @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@500;700&display=swap");
+
     .${TAB_ICON_CLASS} {
       display: inline-block;
       width: 1em;
@@ -1250,84 +1548,104 @@ function injectStyles() {
       }
     }
 
+    /* ================================================================
+       Civitai Updater — "release ledger" theme.
+       Flat warm-ink surfaces, hairline seams, mono data columns.
+       Red is reserved for one meaning: a new release exists.
+       ================================================================ */
+
     .cu-root {
-      --cu-bg-0: #0f1218;
-      --cu-bg-1: #151c2a;
-      --cu-card: rgba(24, 32, 51, 0.65);
-      --cu-text: #e4eaf5;
-      --cu-muted: #8d9bb5;
-      --cu-border: rgba(255, 255, 255, 0.08);
-      --cu-accent: #1ccf98;
-      --cu-accent-2: #4fb4ff;
-      --cu-danger: #ff6f7d;
-      --cu-warn: #f3a638;
-      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-      color: var(--cu-text);
+      --cu-ink: #131316;
+      --cu-slate: #1b1b20;
+      --cu-raise: #232329;
+      --cu-seam: #2e2e36;
+      --cu-seam-strong: #40404b;
+      --cu-bone: #eceae4;
+      --cu-ash: #96939c;
+      --cu-dust: #6a6772;
+      --cu-red: #ff4b3e;
+      --cu-red-soft: #f2857b;
+      --cu-red-dim: rgba(255, 75, 62, 0.12);
+      --cu-moss: #93b578;
+      --cu-amber: #d2a24c;
+      --cu-h-ctl: 26px;
+      --cu-h-btn: 30px;
+      --cu-radius: 5px;
+      --cu-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+      --cu-disp: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+      --cu-body: "Segoe UI", system-ui, -apple-system, sans-serif;
+      font-family: var(--cu-body);
+      color: var(--cu-bone);
       display: flex;
       flex-direction: column;
       gap: 10px;
       padding: 12px;
-      font-size: 12.5px;
-      line-height: 1.4;
-      background: linear-gradient(180deg, var(--cu-bg-0), var(--cu-bg-1));
+      font-size: 12px;
+      line-height: 1.45;
+      background: var(--cu-ink);
+      container-type: inline-size;
     }
 
-    /* ---- Hero ---- */
+    .cu-root ::selection {
+      background: var(--cu-red-dim);
+    }
+
+    /* ---- Masthead ---- */
 
     .cu-hero {
-      padding: 14px 12px 12px;
-      border-radius: 12px;
-      border: 1px solid var(--cu-border);
-      background: linear-gradient(135deg, rgba(28, 207, 152, 0.12) 0%, rgba(24, 32, 51, 0.7) 60%);
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+      padding: 4px 2px 10px;
+      border-bottom: 1px solid var(--cu-seam);
     }
 
     .cu-hero-title {
-      font-size: 20px;
+      font-family: var(--cu-disp);
+      font-size: 14px;
       font-weight: 700;
-      letter-spacing: 0.02em;
-      margin: 0 0 2px 0;
-      color: #f0f5ff;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--cu-bone);
+      margin: 0 0 3px 0;
+    }
+
+    .cu-hero-title::after {
+      content: ".";
+      color: var(--cu-red);
+      letter-spacing: 0;
     }
 
     .cu-hero-sub {
       margin: 0;
-      color: var(--cu-muted);
-      font-size: 12px;
+      color: var(--cu-ash);
+      font-size: 11px;
     }
 
     /* ---- Cards ---- */
 
     .cu-card {
-      border: 1px solid var(--cu-border);
-      border-radius: 12px;
-      padding: 12px;
-      background: var(--cu-card);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-      transition: border-color 0.2s ease, box-shadow 0.2s ease;
-    }
-
-    .cu-card:hover {
-      border-color: rgba(79, 180, 255, 0.25);
-      box-shadow: 0 6px 24px rgba(79, 180, 255, 0.06);
+      border: 1px solid var(--cu-seam);
+      border-radius: 6px;
+      padding: 11px;
+      background: var(--cu-slate);
     }
 
     .cu-card > h3,
-    .cu-head h3 {
+    .cu-head h3,
+    .cu-label {
       margin: 0;
-      color: #a0b0c8;
-      font-size: 10px;
+      font-family: var(--cu-mono);
+      color: var(--cu-dust);
+      font-size: 9.5px;
+      font-weight: 500;
       text-transform: uppercase;
-      letter-spacing: 0.07em;
-      font-weight: 700;
+      letter-spacing: 0.12em;
     }
 
     .cu-card > h3 {
       margin-bottom: 8px;
+    }
+
+    .cu-label {
+      margin: 10px 0 5px 0;
     }
 
     .cu-head {
@@ -1335,21 +1653,28 @@ function injectStyles() {
       justify-content: space-between;
       align-items: center;
       gap: 8px;
-      margin-bottom: 8px;
+      min-height: var(--cu-h-ctl);
+      margin-bottom: 9px;
     }
 
-    /* ---- Layout helpers ---- */
-
-    .cu-action-bar {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-      margin-bottom: 8px;
+    .cu-head .cu-label {
+      margin: 0;
     }
 
-    .cu-action-bar .cu-btn-primary {
-      flex: 1;
-      min-width: 110px;
+    .cu-small {
+      font-size: 11px;
+      color: var(--cu-ash);
+    }
+
+    .cu-small strong {
+      color: var(--cu-bone);
+      font-weight: 600;
+    }
+
+    .cu-divider {
+      border: none;
+      border-top: 1px solid var(--cu-seam);
+      margin: 10px 0;
     }
 
     .cu-row {
@@ -1359,60 +1684,31 @@ function injectStyles() {
       align-items: center;
     }
 
-    .cu-label {
-      margin: 10px 0 4px 0;
-      color: var(--cu-muted);
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .cu-head .cu-label {
-      margin: 0;
-    }
-
-    .cu-help {
-      margin: 2px 0 6px 0;
-      color: var(--cu-muted);
-      font-size: 11.5px;
-      line-height: 1.35;
-    }
-
-    .cu-small {
-      font-size: 11.5px;
-      color: var(--cu-muted);
-    }
-
-    .cu-divider {
-      border: none;
-      border-top: 1px solid var(--cu-border);
-      margin: 10px 0;
-    }
-
     /* ---- Buttons ---- */
 
     .cu-btn {
-      border: 1px solid var(--cu-border);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.04);
-      color: #c0cfea;
-      padding: 5px 11px;
-      cursor: pointer;
-      font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: var(--cu-h-btn);
+      padding: 0 12px;
+      font-family: var(--cu-disp);
       font-weight: 600;
-      line-height: 1.3;
-      transition: border-color 0.2s ease, background 0.2s ease, transform 0.1s ease, box-shadow 0.2s ease;
+      font-size: 11.5px;
+      letter-spacing: 0.015em;
+      line-height: 1;
+      border: 1px solid var(--cu-seam-strong);
+      border-radius: var(--cu-radius);
+      background: var(--cu-raise);
+      color: var(--cu-bone);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
     }
 
     .cu-btn:hover {
-      border-color: rgba(79, 180, 255, 0.4);
-      background: rgba(255, 255, 255, 0.08);
-      box-shadow: 0 0 8px rgba(79, 180, 255, 0.15);
-    }
-
-    .cu-btn:active {
-      transform: scale(0.97);
+      border-color: var(--cu-dust);
+      background: #2a2a31;
     }
 
     .cu-btn:disabled {
@@ -1422,62 +1718,56 @@ function injectStyles() {
     }
 
     .cu-btn-primary {
-      border-color: transparent;
-      color: #072016;
-      background: linear-gradient(135deg, var(--cu-accent), #1ab583);
+      border-color: #e63d31;
+      background: linear-gradient(180deg, #ff5749 0%, #f0392c 100%);
+      color: #1a0705;
       font-weight: 700;
-      box-shadow: 0 2px 8px rgba(28, 207, 152, 0.25);
-      transition: filter 0.2s, transform 0.1s, box-shadow 0.2s;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 1px 2px rgba(0, 0, 0, 0.45);
     }
 
     .cu-btn-primary:hover {
-      filter: brightness(1.1);
-      box-shadow: 0 4px 12px rgba(28, 207, 152, 0.45);
+      border-color: #ff6558;
+      background: linear-gradient(180deg, #ff6659 0%, #f8483a 100%);
     }
 
-    .cu-btn-secondary {
-      color: #8dd4f5;
-      border-color: rgba(79, 180, 255, 0.3);
-      background: rgba(79, 180, 255, 0.1);
-      transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, transform 0.1s;
-    }
-
-    .cu-btn-secondary:hover {
-      background: rgba(79, 180, 255, 0.18);
-      border-color: rgba(79, 180, 255, 0.5);
-      box-shadow: 0 0 10px rgba(79, 180, 255, 0.2);
-    }
-
-    .cu-btn-danger {
-      color: #ff9ca6;
-      border-color: rgba(255, 111, 125, 0.3);
-      background: rgba(255, 111, 125, 0.08);
-      transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, transform 0.1s;
-    }
-
-    .cu-btn-danger:hover {
-      background: rgba(255, 111, 125, 0.15);
-      border-color: rgba(255, 111, 125, 0.5);
-      box-shadow: 0 0 10px rgba(255, 111, 125, 0.15);
+    .cu-btn-primary:active {
+      background: linear-gradient(180deg, #ef3e31 0%, #e5342a 100%);
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
     }
 
     .cu-btn-outline {
-      color: var(--cu-muted);
-      border-color: var(--cu-border);
+      background: var(--cu-raise);
+      border-color: var(--cu-seam-strong);
+      color: var(--cu-ash);
+    }
+
+    .cu-btn-outline:hover {
+      color: var(--cu-bone);
+      background: var(--cu-raise);
+    }
+
+    .cu-btn-danger {
       background: transparent;
-      font-weight: 500;
-      font-size: 11px;
+      border-color: rgba(255, 75, 62, 0.35);
+      color: var(--cu-red-soft);
+    }
+
+    .cu-btn-danger:hover {
+      background: var(--cu-red-dim);
+      border-color: var(--cu-red);
+      color: var(--cu-red-soft);
     }
 
     .cu-btn-sm {
-      padding: 3px 9px;
+      height: var(--cu-h-ctl);
+      padding: 0 10px;
       font-size: 11px;
     }
 
     .cu-text-btn {
       background: none;
       border: none;
-      color: var(--cu-accent-2);
+      color: var(--cu-ash);
       cursor: pointer;
       font-size: 11px;
       font-weight: 600;
@@ -1486,11 +1776,24 @@ function injectStyles() {
     }
 
     .cu-text-btn:hover {
-      color: #a0d8ff;
+      color: var(--cu-bone);
       text-decoration: underline;
     }
 
-    /* ---- Job controls ---- */
+    /* ---- Action bar / job controls ---- */
+
+    .cu-action-bar {
+      display: grid;
+      grid-template-columns: 1.12fr 1fr;
+      gap: 6px;
+      margin-bottom: 9px;
+    }
+
+    @container (max-width: 330px) {
+      .cu-action-bar {
+        grid-template-columns: 1fr;
+      }
+    }
 
     .cu-job-controls {
       gap: 6px;
@@ -1504,81 +1807,83 @@ function injectStyles() {
       display: flex;
       gap: 8px;
       align-items: center;
-      margin-top: 6px;
+      margin-top: 8px;
       margin-bottom: 4px;
     }
 
     .cu-progress {
       flex: 1;
-      height: 6px;
-      border-radius: 3px;
-      background: rgba(255, 255, 255, 0.06);
+      height: 3px;
+      background: var(--cu-seam);
       overflow: hidden;
     }
 
     .cu-progress-fill {
       height: 100%;
       width: 0;
-      background: linear-gradient(90deg, var(--cu-accent), var(--cu-accent-2));
-      border-radius: 3px;
+      background: var(--cu-red);
       transition: width 200ms linear;
     }
 
     .cu-progress-pct {
-      font-family: "JetBrains Mono", "Consolas", monospace;
-      font-size: 11px;
-      color: var(--cu-muted);
-      min-width: 28px;
+      font-family: var(--cu-mono);
+      font-size: 10px;
+      color: var(--cu-ash);
+      min-width: 30px;
       text-align: right;
     }
 
-    /* ---- Cache info ---- */
+    /* ---- Cache line + status pills ---- */
 
     .cu-cache-info {
-      font-size: 11.5px;
-      color: var(--cu-muted);
-      margin-bottom: 6px;
-      display: inline-flex;
+      display: flex;
       align-items: center;
-      gap: 4px;
+      gap: 6px;
       flex-wrap: wrap;
+      min-height: 18px;
+      margin-bottom: 7px;
+      font-size: 11px;
+      color: var(--cu-ash);
     }
 
     .cu-status-pill {
       display: inline-flex;
       align-items: center;
-      justify-content: center;
-      font-size: 9.5px;
-      font-weight: 700;
+      font-family: var(--cu-mono);
+      font-size: 8.5px;
+      font-weight: 500;
       text-transform: uppercase;
+      letter-spacing: 0.08em;
       padding: 2px 6px;
-      border-radius: 4px;
-      line-height: 1;
+      border-radius: 3px;
+      line-height: 1.2;
       border: 1px solid;
     }
 
     .cu-status-pill[data-status="cached"] {
-      color: var(--cu-accent);
-      border-color: rgba(28, 207, 152, 0.3);
-      background: rgba(28, 207, 152, 0.08);
+      color: var(--cu-moss);
+      border-color: rgba(147, 181, 120, 0.35);
+      background: rgba(147, 181, 120, 0.07);
     }
 
     .cu-status-pill[data-status="stale"] {
-      color: var(--cu-warn);
-      border-color: rgba(243, 166, 56, 0.3);
-      background: rgba(243, 166, 56, 0.08);
+      color: var(--cu-amber);
+      border-color: rgba(210, 162, 76, 0.35);
+      background: rgba(210, 162, 76, 0.07);
     }
 
     .cu-status-pill[data-status="dirty"] {
-      color: var(--cu-danger);
-      border-color: rgba(255, 111, 125, 0.3);
-      background: rgba(255, 111, 125, 0.08);
+      color: var(--cu-red-soft);
+      border-color: rgba(255, 75, 62, 0.35);
+      background: var(--cu-red-dim);
     }
 
     .cu-dirty-details {
-      font-size: 11px;
-      color: var(--cu-muted);
+      font-size: 10.5px;
+      color: var(--cu-dust);
     }
+
+    /* ---- Sidecar warnings ---- */
 
     .cu-sidecar-warnings {
       display: none;
@@ -1586,19 +1891,24 @@ function injectStyles() {
     }
 
     .cu-warning-panel {
-      border: 1px solid rgba(243, 166, 56, 0.35);
-      border-radius: 8px;
-      background: rgba(243, 166, 56, 0.08);
+      border: 1px solid rgba(210, 162, 76, 0.4);
+      border-radius: 5px;
+      background: rgba(210, 162, 76, 0.06);
       overflow: hidden;
     }
 
     .cu-warning-panel > summary {
       padding: 7px 9px;
-      color: #ffc96f;
+      color: var(--cu-amber);
       cursor: pointer;
-      font-size: 11.5px;
-      font-weight: 650;
+      font-size: 11px;
+      font-weight: 600;
       user-select: none;
+      list-style: none;
+    }
+
+    .cu-warning-panel > summary::-webkit-details-marker {
+      display: none;
     }
 
     .cu-sidecar-warning-list {
@@ -1609,28 +1919,28 @@ function injectStyles() {
     }
 
     .cu-sidecar-warning-row {
-      border-top: 1px solid rgba(243, 166, 56, 0.2);
+      border-top: 1px solid rgba(210, 162, 76, 0.2);
       padding-top: 7px;
     }
 
     .cu-sidecar-warning-name {
-      color: #f2f5fa;
+      color: var(--cu-bone);
       font-weight: 600;
       overflow-wrap: anywhere;
     }
 
     .cu-sidecar-warning-message {
       margin-top: 2px;
-      color: #d4b77f;
+      color: var(--cu-ash);
       font-size: 11px;
     }
 
     .cu-sidecar-warning-path {
       display: block;
       margin-top: 4px;
-      color: #8d9bb5;
-      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-      font-size: 9.5px;
+      color: var(--cu-dust);
+      font-family: var(--cu-mono);
+      font-size: 9px;
       white-space: normal;
       overflow-wrap: anywhere;
     }
@@ -1646,30 +1956,31 @@ function injectStyles() {
       position: absolute;
       bottom: 130%;
       left: 50%;
-      transform: translateX(-50%) scale(0.95);
-      background: rgba(12, 18, 30, 0.98);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      color: #e4eaf5;
-      padding: 6px 10px;
-      border-radius: 6px;
-      font-size: 11px;
-      font-weight: 500;
+      transform: translateX(-50%);
+      background: #26262c;
+      border: 1px solid var(--cu-seam-strong);
+      color: var(--cu-bone);
+      padding: 6px 9px;
+      border-radius: 4px;
+      font-family: var(--cu-body);
+      font-size: 10.5px;
+      font-weight: 400;
+      letter-spacing: 0;
       white-space: normal;
       width: max-content;
       max-width: 220px;
       z-index: 99999;
       pointer-events: none;
       opacity: 0;
-      transition: opacity 0.15s ease, transform 0.15s ease;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      transition: opacity 0.12s ease;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.55);
       line-height: 1.35;
       text-transform: none;
-      text-align: center;
+      text-align: left;
     }
 
     .cu-tooltip:hover::after {
       opacity: 1;
-      transform: translateX(-50%) scale(1);
     }
 
     .cu-info-trigger {
@@ -1679,74 +1990,204 @@ function injectStyles() {
       width: 14px;
       height: 14px;
       border-radius: 50%;
-      background: rgba(255, 255, 255, 0.08);
-      color: var(--cu-muted);
+      background: var(--cu-raise);
+      color: var(--cu-dust);
       font-size: 9px;
-      font-weight: bold;
       cursor: help;
       margin-left: 6px;
       vertical-align: middle;
-      transition: background 0.2s ease, color 0.2s ease;
+      transition: color 0.15s ease, background-color 0.15s ease;
     }
 
     .cu-info-trigger:hover {
-      background: rgba(79, 180, 255, 0.25);
-      color: var(--cu-accent-2);
+      background: var(--cu-seam-strong);
+      color: var(--cu-bone);
     }
 
-    /* ---- Status ---- */
+    /* ---- Status line ---- */
 
     .cu-status {
-      font-size: 11.5px;
-      color: var(--cu-muted);
+      font-family: var(--cu-mono);
+      font-size: 10.5px;
+      color: var(--cu-ash);
       min-height: 16px;
       margin-top: 2px;
     }
 
-    /* ---- Scan report banner ---- */
+    /* ---- Scan report ---- */
 
     .cu-scan-report {
       display: none;
       margin-bottom: 8px;
-      border: 1px solid rgba(79, 180, 255, 0.2);
-      border-radius: 8px;
-      background: rgba(79, 180, 255, 0.06);
+      border: 1px solid var(--cu-seam);
+      border-radius: 5px;
+      background: var(--cu-ink);
       padding: 8px 10px;
-      color: #b8d4f0;
-      font-size: 11.5px;
     }
 
     .cu-scan-report.is-visible {
       display: block;
     }
 
-    /* ---- Results ---- */
+    /* ---- Results header ---- */
 
     .cu-summary {
-      font-size: 11.5px;
-      color: var(--cu-muted);
+      font-family: var(--cu-mono);
+      font-size: 10.5px;
+      color: var(--cu-ash);
       margin-bottom: 8px;
     }
 
     .cu-filters {
-      display: flex;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
       gap: 6px;
-      flex-wrap: wrap;
-      margin-bottom: 8px;
+      margin-bottom: 9px;
+    }
+
+    @container (max-width: 330px) {
+      .cu-filters {
+        grid-template-columns: 1fr;
+      }
     }
 
     .cu-filters select,
-    .cu-filter-menu > summary {
-      border: 1px solid var(--cu-border);
-      border-radius: 6px;
-      padding: 4px 6px;
-      background: rgba(255, 255, 255, 0.04);
-      color: #c0cfea;
+    #cu-size,
+    .cu-filter-menu > summary,
+    .cu-toggle {
+      display: flex;
+      align-items: center;
+      box-sizing: border-box;
+      height: var(--cu-h-ctl);
+      width: 100%;
+      padding: 0 9px 0 8px;
+      border: 1px solid var(--cu-seam-strong);
+      border-radius: var(--cu-radius);
+      background: var(--cu-raise);
+      color: var(--cu-bone);
+      font-family: var(--cu-body);
       font-size: 11px;
+      line-height: 1;
+      transition: border-color 0.15s ease;
+    }
+
+    /* Native select chrome differs per platform; draw our own caret so a
+       select and a filter menu are the same object visually. */
+    .cu-filters select,
+    #cu-size,
+    .cu-arrange-row select {
+      -webkit-appearance: none;
+      appearance: none;
+      padding-right: 24px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' fill='none' stroke='%236a6772' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-position: right 8px center;
+      background-repeat: no-repeat;
+    }
+
+    /* A <details> has no chrome of its own, so without this the filter menus
+       read as text fields sitting next to real dropdowns. */
+    .cu-filter-menu > summary::after {
+      content: "";
+      flex: 0 0 auto;
+      width: 5px;
+      height: 5px;
+      margin-left: 8px;
+      border-right: 1.5px solid var(--cu-dust);
+      border-bottom: 1.5px solid var(--cu-dust);
+      border-radius: 0 0 1px 0;
+      transform: translateY(-2px) rotate(45deg);
+      transition: transform 140ms ease, border-color 140ms ease;
+    }
+
+    .cu-filter-menu[open] > summary::after {
+      transform: translateY(1px) rotate(-135deg);
+      border-color: var(--cu-bone);
+    }
+
+    .cu-ctl-label {
+      flex: 0 0 auto;
+      font-family: var(--cu-mono);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.11em;
+      color: var(--cu-dust);
+      margin-right: 7px;
+    }
+
+    .cu-ctl-value {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--cu-bone);
+    }
+
+    .cu-filters select:hover,
+    #cu-size:hover,
+    .cu-filter-menu > summary:hover,
+    .cu-toggle:hover {
+      border-color: var(--cu-dust);
+    }
+
+    .cu-filter-menu[open] > summary {
+      border-color: var(--cu-dust);
+      background: #26262d;
+    }
+
+    /* ---- Checkbox: drawn, not inherited from the platform ---- */
+
+    .cu-root input[type="checkbox"] {
+      -webkit-appearance: none;
+      appearance: none;
+      display: inline-grid;
+      place-content: center;
+      box-sizing: border-box;
+      width: 13px;
+      height: 13px;
+      margin: 0;
+      flex: 0 0 auto;
+      border: 1px solid var(--cu-seam-strong);
+      border-radius: 3px;
+      background: var(--cu-ink);
+      cursor: pointer;
+      transition: background-color 120ms ease, border-color 120ms ease;
+    }
+
+    .cu-root input[type="checkbox"]:hover {
+      border-color: var(--cu-dust);
+    }
+
+    .cu-root input[type="checkbox"]:checked {
+      background: #b7b4bd;
+      border-color: #b7b4bd;
+    }
+
+    .cu-root input[type="checkbox"]::after {
+      content: "";
+      width: 3px;
+      height: 6px;
+      margin-top: -2px;
+      border: solid var(--cu-ink);
+      border-width: 0 1.6px 1.6px 0;
+      transform: rotate(45deg) scale(0);
+      transition: transform 120ms ease;
+    }
+
+    .cu-root input[type="checkbox"]:checked::after {
+      transform: rotate(45deg) scale(1);
+    }
+
+    .cu-toggle {
+      color: var(--cu-bone);
+    }
+
+    #cu-size {
+      width: 62px;
+      flex: 0 0 62px;
     }
 
     .cu-filter-slot {
-      flex: 1 1 140px;
       min-width: 0;
     }
 
@@ -1755,12 +2196,13 @@ function injectStyles() {
     }
 
     .cu-filter-menu > summary {
+      /* Stays flex: the shared control rule above lays out label, value and
+         chevron, and a display:block here would silently undo it. */
       list-style: none;
       cursor: pointer;
       user-select: none;
       white-space: nowrap;
       overflow: hidden;
-      text-overflow: ellipsis;
     }
 
     .cu-filter-menu > summary::-webkit-details-marker {
@@ -1774,20 +2216,17 @@ function injectStyles() {
       left: 0;
       min-width: 180px;
       max-width: 260px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 8px;
-      background: rgba(18, 25, 38, 0.92);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+      border: 1px solid var(--cu-seam-strong);
+      border-radius: 6px;
+      background: #202026;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
       padding: 8px;
-      transform-origin: top left;
-      animation: cu-fade-in 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+      animation: cu-fade-in 0.12s ease-out;
     }
 
     @keyframes cu-fade-in {
-      from { opacity: 0; transform: scale(0.95); }
-      to { opacity: 1; transform: scale(1); }
+      from { opacity: 0; }
+      to { opacity: 1; }
     }
 
     .cu-filter-actions {
@@ -1810,34 +2249,24 @@ function injectStyles() {
       align-items: center;
       gap: 6px;
       font-size: 11px;
-      color: #c0cfea;
+      color: var(--cu-bone);
+      cursor: pointer;
     }
 
     .cu-filter-empty {
       font-size: 10.5px;
-      color: #6e7e99;
-      font-style: italic;
+      color: var(--cu-dust);
     }
 
     .cu-toggle {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 6px;
-      border: 1px solid var(--cu-border);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.04);
-      font-size: 11px;
-      color: #c0cfea;
+      gap: 8px;
       cursor: pointer;
       white-space: nowrap;
-      transition: all 0.15s ease;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    .cu-toggle:hover {
-      border-color: rgba(79, 180, 255, 0.3);
-      background: rgba(255, 255, 255, 0.08);
-    }
+    /* ---- Results list ---- */
 
     .cu-results {
       display: flex;
@@ -1846,8 +2275,7 @@ function injectStyles() {
     }
 
     .cu-empty {
-      font-style: italic;
-      color: #5a6a85;
+      color: var(--cu-dust);
       font-size: 11.5px;
       padding: 4px 0;
     }
@@ -1858,27 +2286,26 @@ function injectStyles() {
       display: grid;
       grid-template-columns: 56px 1fr;
       gap: 10px;
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      border-radius: 10px;
+      border: 1px solid var(--cu-seam);
+      border-radius: 5px;
       padding: 8px;
-      background: rgba(255, 255, 255, 0.02);
-      transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+      background: rgba(0, 0, 0, 0.18);
+      transition: border-color 0.15s ease;
     }
 
     .cu-item:hover {
-      border-color: rgba(28, 207, 152, 0.2);
-      background: rgba(255, 255, 255, 0.04);
-      transform: translateY(-1px);
+      border-color: var(--cu-seam-strong);
     }
 
     .cu-thumb {
       width: 56px;
       height: 56px;
-      border-radius: 8px;
+      border-radius: 4px;
       overflow: hidden;
-      background: rgba(255, 255, 255, 0.04);
+      background: var(--cu-raise);
+      border: 1px solid var(--cu-seam);
       flex-shrink: 0;
-      cursor: pointer;
+      cursor: zoom-in;
       position: relative;
     }
 
@@ -1886,7 +2313,6 @@ function injectStyles() {
       content: "";
       position: absolute;
       inset: 0;
-      border-radius: 8px;
       background: rgba(0, 0, 0, 0.35);
       opacity: 0;
       transition: opacity 150ms;
@@ -1903,12 +2329,6 @@ function injectStyles() {
       height: 100%;
       object-fit: cover;
       display: block;
-      transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-    }
-
-    .cu-thumb:hover img,
-    .cu-thumb:hover video {
-      transform: scale(1.12);
     }
 
     .cu-thumb-empty {
@@ -1917,8 +2337,9 @@ function injectStyles() {
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #5a6a85;
-      font-size: 9px;
+      color: var(--cu-dust);
+      font-family: var(--cu-mono);
+      font-size: 8.5px;
       text-align: center;
     }
 
@@ -1926,15 +2347,51 @@ function injectStyles() {
       min-width: 0;
     }
 
+    /* Model header: name owns the full row, type sits at the right edge. */
+
     .cu-item-header {
-      margin-bottom: 3px;
+      margin-bottom: 5px;
+    }
+
+    .cu-ver-row.cu-ver-row-model {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+
+    .cu-ver-row-model .cu-ver-date,
+    .cu-ver-row-model .cu-ver-base {
+      display: none;
+    }
+
+    .cu-ver-label.cu-ver-label-model {
+      order: 2;
+      margin-left: auto;
+      flex-shrink: 0;
+      padding: 0;
+      background: transparent;
+      border: 0;
+      overflow: visible;
+    }
+
+    .cu-ver-label.cu-ver-label-model::before {
+      content: none;
+    }
+
+    .cu-ver-row-model .cu-ver-main {
+      order: 1;
+      min-width: 0;
+      flex: 1 1 auto;
     }
 
     .cu-item-header h4 {
+      flex: 1 1 auto;
       margin: 0;
-      font-size: 12px;
-      font-weight: 600;
-      color: #dce5f5;
+      font-family: var(--cu-disp);
+      font-size: 12.5px;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+      color: var(--cu-bone);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -1943,85 +2400,166 @@ function injectStyles() {
 
     .cu-type-pill {
       display: inline-block;
-      font-size: 9px;
-      font-weight: 600;
+      font-family: var(--cu-mono);
+      font-size: 8.5px;
+      font-weight: 500;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: #7a8aa5;
-      border: 1px solid var(--cu-border);
-      border-radius: 4px;
-      padding: 1px 5px;
+      letter-spacing: 0.08em;
+      color: var(--cu-dust);
+      border: 1px solid var(--cu-seam);
+      border-radius: 3px;
+      padding: 2px 5px;
+      line-height: 1.2;
     }
 
-    .cu-type-pill[data-type="checkpoint"] { color: #7eb0ff; border-color: rgba(126, 176, 255, 0.3); background: rgba(126, 176, 255, 0.06); }
-    .cu-type-pill[data-type="lora"] { color: #1ccf98; border-color: rgba(28, 207, 152, 0.3); background: rgba(28, 207, 152, 0.06); }
-    .cu-type-pill[data-type="vae"] { color: #c49bff; border-color: rgba(196, 155, 255, 0.3); background: rgba(196, 155, 255, 0.06); }
-    .cu-type-pill[data-type="unet"] { color: #f3a638; border-color: rgba(243, 166, 56, 0.3); background: rgba(243, 166, 56, 0.06); }
-    .cu-type-pill[data-type="embedding"] { color: #ff8eb3; border-color: rgba(255, 142, 179, 0.3); background: rgba(255, 142, 179, 0.06); }
+    .cu-creator {
+      font-size: 10.5px;
+      color: var(--cu-dust);
+      font-weight: 400;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    /* In the card header the model name wins the fight for space. */
+
+    .cu-ver-row-model .cu-creator {
+      flex: 0 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .cu-provisional {
+      font-family: var(--cu-mono);
+      font-size: 8.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--cu-dust);
+      border: 1px dashed var(--cu-seam-strong);
+      border-radius: 3px;
+      padding: 1px 5px;
+      white-space: nowrap;
+    }
+
+    /* ---- The release rail ----
+       Each version row is a dot on a shared rail:
+       hollow = saved locally, red = new release,
+       dust ring = metadata-only, filled gray = hidden. */
 
     .cu-versions {
+      position: relative;
       display: flex;
       flex-direction: column;
-      gap: 5px;
-      margin-bottom: 5px;
+      gap: 6px;
+      margin-bottom: 3px;
       font-size: 11px;
+    }
+
+    .cu-versions::before {
+      content: "";
+      position: absolute;
+      left: 3px;
+      top: 9px;
+      bottom: 9px;
+      width: 1px;
+      background: var(--cu-seam);
     }
 
     .cu-ver-row {
       display: grid;
-      grid-template-columns: 82px 58px 84px minmax(0, 1fr);
+      grid-template-columns: 64px 60px minmax(0, 72px) minmax(0, 1fr);
       align-items: center;
       gap: 6px;
     }
 
-    .cu-ver-label {
-      font-size: 9px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      padding: 1px 5px;
-      border-radius: 3px;
-      white-space: nowrap;
-      flex-shrink: 0;
-      min-width: 32px;
-      text-align: center;
+    /* The sidebar is not the viewport: adapt columns to the panel width. */
+
+    @container (max-width: 430px) {
+      .cu-versions .cu-ver-row {
+        grid-template-columns: 64px 60px minmax(0, 1fr);
+      }
+
+      .cu-versions .cu-ver-base {
+        display: none;
+      }
     }
 
-    .cu-ver-label-model {
-      padding: 0;
-      background: transparent;
-      border: 0;
-      min-width: 0;
+    @container (max-width: 330px) {
+      .cu-versions .cu-ver-row {
+        grid-template-columns: 64px minmax(0, 1fr);
+      }
+
+      .cu-versions .cu-ver-date {
+        display: none;
+      }
+    }
+
+    .cu-ver-label {
+      position: relative;
+      display: flex;
+      align-items: center;
+      font-family: var(--cu-mono);
+      font-size: 9px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    .cu-ver-label::before {
+      content: "";
+      flex-shrink: 0;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      margin-right: 7px;
+      background: var(--cu-slate);
+      border: 1.5px solid var(--cu-dust);
+      box-sizing: border-box;
     }
 
     .cu-ver-label[data-role="saved"] {
-      color: #8d9bb5;
-      background: rgba(141, 155, 181, 0.1);
-      border: 1px solid rgba(141, 155, 181, 0.15);
+      color: var(--cu-ash);
+    }
+
+    .cu-ver-label[data-role="saved"]::before {
+      border-color: #b7b4bd;
     }
 
     .cu-ver-label[data-role="metadata"] {
-      color: #c5a76b;
-      background: rgba(197, 167, 107, 0.12);
-      border: 1px solid rgba(197, 167, 107, 0.2);
+      color: var(--cu-dust);
+    }
+
+    .cu-ver-label[data-role="metadata"]::before {
+      border-color: var(--cu-dust);
     }
 
     .cu-ver-label[data-role="new"] {
-      color: #7eb0ff;
-      background: rgba(126, 176, 255, 0.1);
-      border: 1px solid rgba(126, 176, 255, 0.2);
+      color: var(--cu-red-soft);
+    }
+
+    .cu-ver-label[data-role="new"]::before {
+      background: var(--cu-red);
+      border-color: var(--cu-red);
+      box-shadow: 0 0 6px rgba(255, 75, 62, 0.55);
     }
 
     .cu-ver-label[data-role="hidden"] {
-      color: #c5a76b;
-      background: rgba(197, 167, 107, 0.12);
-      border: 1px solid rgba(197, 167, 107, 0.2);
+      color: var(--cu-dust);
+    }
+
+    .cu-ver-label[data-role="hidden"]::before {
+      background: var(--cu-seam-strong);
+      border-color: var(--cu-seam-strong);
     }
 
     .cu-ver-date,
     .cu-ver-base {
-      font-size: 10px;
-      color: #7a8aa5;
+      font-family: var(--cu-mono);
+      font-variant-numeric: tabular-nums;
+      font-size: 9.5px;
+      color: var(--cu-dust);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -2035,12 +2573,8 @@ function injectStyles() {
       overflow: hidden;
     }
 
-    .cu-ver-main h4 {
-      flex: 1 1 auto;
-    }
-
     .cu-ver-link {
-      color: var(--cu-accent-2);
+      color: var(--cu-red-soft);
       cursor: pointer;
       text-decoration: none;
       transition: color 100ms;
@@ -2052,61 +2586,59 @@ function injectStyles() {
     }
 
     .cu-ver-link:hover {
-      color: #a0d8ff;
+      color: var(--cu-red);
       text-decoration: underline;
     }
 
+    /* Saved rows: the name copies a file path, it doesn't open Civitai. */
+
+    .cu-copy-path {
+      color: var(--cu-ash);
+      border-bottom: 1px dotted var(--cu-seam-strong);
+    }
+
+    .cu-copy-path:hover {
+      color: var(--cu-bone);
+      text-decoration: none;
+      border-bottom-color: var(--cu-dust);
+    }
+
     .cu-access-badge {
-      color: #d7a944;
-      background: rgba(215, 169, 68, 0.12);
-      border: 1px solid rgba(215, 169, 68, 0.24);
+      font-family: var(--cu-mono);
+      font-size: 8.5px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--cu-amber);
+      background: rgba(210, 162, 76, 0.08);
+      border: 1px solid rgba(210, 162, 76, 0.3);
       border-radius: 3px;
       padding: 1px 5px;
-      font-size: 9px;
-      font-weight: 600;
       white-space: nowrap;
       flex: 0 0 auto;
     }
 
-    .cu-creator {
-      font-size: 11px;
-      color: #5a6a85;
-      font-weight: 400;
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-
-    .cu-provisional {
-      font-size: 9px;
-      color: #f0be62;
-      border: 1px solid rgba(240, 190, 98, 0.2);
-      border-radius: 999px;
-      padding: 1px 6px;
-      white-space: nowrap;
-    }
-
     .cu-inline-btn {
-      border: 1px solid var(--cu-border);
-      background: rgba(255, 255, 255, 0.04);
-      color: #c0cfea;
-      border-radius: 999px;
+      border: 1px solid var(--cu-seam-strong);
+      background: transparent;
+      color: var(--cu-dust);
+      border-radius: 4px;
+      font-family: var(--cu-body);
       font-size: 10px;
       padding: 1px 7px;
       cursor: pointer;
       white-space: nowrap;
       flex: 0 0 auto;
-      transition: all 0.15s ease;
+      transition: color 0.15s ease, border-color 0.15s ease;
     }
 
     .cu-inline-btn:hover {
-      border-color: #4fb4ff;
-      color: #dce5f5;
-      background: rgba(79, 180, 255, 0.1);
-      transform: translateY(-0.5px);
+      border-color: var(--cu-dust);
+      color: var(--cu-bone);
     }
 
     .cu-ver-row.is-hidden {
-      opacity: 0.72;
+      opacity: 0.6;
     }
 
     /* ---- Pagination ---- */
@@ -2120,26 +2652,24 @@ function injectStyles() {
     }
 
     .cu-page-btn {
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid var(--cu-border);
-      border-radius: 6px;
-      color: #c0cfea;
+      background: var(--cu-raise);
+      border: 1px solid var(--cu-seam-strong);
+      border-radius: 4px;
+      color: var(--cu-bone);
       cursor: pointer;
-      font-size: 14px;
-      font-weight: 700;
-      width: 28px;
-      height: 28px;
+      font-size: 13px;
+      width: 24px;
+      height: 24px;
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 0;
       line-height: 1;
-      transition: border-color 0.2s ease, background-color 0.2s ease;
+      transition: border-color 0.15s ease;
     }
 
     .cu-page-btn:hover {
-      border-color: rgba(79, 180, 255, 0.4);
-      background: rgba(255, 255, 255, 0.08);
+      border-color: var(--cu-dust);
     }
 
     .cu-page-btn:disabled {
@@ -2149,37 +2679,37 @@ function injectStyles() {
     }
 
     .cu-page-info {
-      font-family: "JetBrains Mono", "Consolas", monospace;
-      font-size: 11px;
-      color: var(--cu-muted);
+      font-family: var(--cu-mono);
+      font-size: 10.5px;
+      color: var(--cu-ash);
     }
 
-    /* ---- Chips ---- */
+    /* ---- Settings: scope chips + options ---- */
 
     .cu-chip {
-      border: 1px solid #2a3d58;
-      border-radius: 6px;
+      border: 1px solid var(--cu-seam-strong);
+      border-radius: 4px;
       padding: 3px 7px;
       display: inline-flex;
-      gap: 4px;
+      gap: 5px;
       align-items: center;
-      background: rgba(79, 180, 255, 0.05);
-      color: #b0c4e0;
+      background: var(--cu-raise);
+      color: var(--cu-ash);
       font-size: 11px;
       cursor: pointer;
-      transition: all 0.15s ease;
+      transition: border-color 0.15s ease, color 0.15s ease;
     }
 
     .cu-chip:hover {
-      border-color: #4fb4ff;
-      background: rgba(79, 180, 255, 0.1);
+      border-color: var(--cu-dust);
+      color: var(--cu-bone);
     }
 
     .cu-option {
       display: flex;
       align-items: center;
       gap: 6px;
-      color: #a0b0c8;
+      color: var(--cu-ash);
       font-size: 11.5px;
       cursor: pointer;
       margin: 4px 0;
@@ -2189,26 +2719,25 @@ function injectStyles() {
       margin: -2px 0 4px 0;
       padding-left: 22px;
       font-size: 10.5px;
-      color: #5f7090;
+      color: var(--cu-dust);
       line-height: 1.3;
     }
 
-    /* ---- Settings collapsible ---- */
-
     .cu-settings > summary {
       cursor: pointer;
-      color: #a0b0c8;
-      font-size: 10px;
+      font-family: var(--cu-mono);
+      color: var(--cu-dust);
+      font-size: 9.5px;
       text-transform: uppercase;
-      letter-spacing: 0.07em;
-      font-weight: 700;
+      letter-spacing: 0.12em;
+      font-weight: 500;
       list-style: none;
       user-select: none;
       transition: color 0.15s ease;
     }
 
     .cu-settings > summary:hover {
-      color: #e4eaf5;
+      color: var(--cu-bone);
     }
 
     .cu-settings > summary::-webkit-details-marker {
@@ -2228,22 +2757,12 @@ function injectStyles() {
       margin-top: 8px;
     }
 
-    /* ---- Select ---- */
-
-    #cu-size {
-      border: 1px solid var(--cu-border);
-      border-radius: 6px;
-      padding: 3px 6px;
-      background: rgba(255, 255, 255, 0.04);
-      color: #c0cfea;
-      font-size: 11px;
-    }
-
-    /* ---- Resolved Roots ---- */
+    /* ---- Resolved roots ---- */
 
     .cu-roots-sum {
-      font-size: 11px;
-      color: var(--cu-muted);
+      font-family: var(--cu-mono);
+      font-size: 9.5px;
+      color: var(--cu-dust);
     }
 
     .cu-roots {
@@ -2251,8 +2770,9 @@ function injectStyles() {
       flex-direction: column;
       gap: 4px;
       margin-top: 6px;
-      font-size: 11px;
-      color: var(--cu-muted);
+      font-family: var(--cu-mono);
+      font-size: 9.5px;
+      color: var(--cu-ash);
     }
 
     .cu-root-row {
@@ -2260,18 +2780,250 @@ function injectStyles() {
       grid-template-columns: 80px 1fr;
       gap: 6px;
       padding-bottom: 4px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      border-bottom: 1px solid var(--cu-seam);
+      overflow-wrap: anywhere;
     }
 
     .cu-root-type {
       text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: #7a8aa5;
-      font-weight: 700;
-      font-size: 10px;
+      letter-spacing: 0.08em;
+      color: var(--cu-dust);
+      font-size: 9px;
     }
 
-    /* ---- Responsive ---- */
+
+    /* ---- Group bands ----
+       Hierarchy is carried by weight and colour, not indentation: a sidebar
+       has no horizontal room to spend on nesting. */
+
+    .cu-group-head-wrap {
+      margin: 13px 0 1px;
+    }
+
+    .cu-results > .cu-group-head-wrap:first-child {
+      margin-top: 1px;
+    }
+
+    .cu-group-head,
+    .cu-subgroup-head {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      width: 100%;
+      padding: 0 0 5px 0;
+      background: none;
+      border: none;
+      cursor: pointer;
+      text-align: left;
+      color: inherit;
+    }
+
+    .cu-group-head {
+      border-bottom: 1px solid var(--cu-seam-strong);
+    }
+
+    .cu-group-caret {
+      flex: 0 0 auto;
+      font-size: 8px;
+      line-height: 1;
+      color: var(--cu-dust);
+      transition: transform 140ms ease;
+    }
+
+    [data-collapsed="true"] .cu-group-caret {
+      transform: rotate(-90deg);
+    }
+
+    .cu-group-name {
+      font-family: var(--cu-mono);
+      font-size: 10px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--cu-bone);
+    }
+
+    .cu-group-count,
+    .cu-subgroup-count {
+      margin-left: auto;
+      font-family: var(--cu-mono);
+      font-size: 9.5px;
+      color: var(--cu-dust);
+      white-space: nowrap;
+    }
+
+    /* The count of waiting releases keeps the release colour. */
+    .cu-group-count b {
+      font-weight: 500;
+      color: var(--cu-red-soft);
+    }
+
+    .cu-group-cont {
+      font-family: var(--cu-mono);
+      font-size: 8.5px;
+      letter-spacing: 0.08em;
+      color: var(--cu-dust);
+      border: 1px solid var(--cu-seam-strong);
+      border-radius: 3px;
+      padding: 0 4px;
+      line-height: 1.5;
+    }
+
+    .cu-subgroup-head-wrap {
+      margin: 9px 0 0;
+      padding-left: 9px;
+      border-left: 1px solid var(--cu-seam);
+    }
+
+    .cu-subgroup-name {
+      font-family: var(--cu-mono);
+      font-size: 9.5px;
+      letter-spacing: 0.08em;
+      color: var(--cu-ash);
+    }
+
+    .cu-group-head:hover .cu-group-name,
+    .cu-subgroup-head:hover .cu-subgroup-name {
+      color: #ffffff;
+    }
+
+    .cu-mature-note {
+      margin-top: 10px;
+      font-family: var(--cu-mono);
+      font-size: 9.5px;
+      color: var(--cu-dust);
+    }
+
+    /* ---- Mature previews: blur the picture, never the information ---- */
+
+    .cu-item[data-mature="blur"] .cu-thumb img,
+    .cu-item[data-mature="blur"] .cu-thumb video {
+      filter: blur(10px) saturate(0.6);
+      transform: scale(1.06);
+    }
+
+    .cu-item[data-mature="blur"] .cu-thumb::before {
+      content: "MATURE";
+      position: absolute;
+      inset: auto 0 4px 0;
+      z-index: 1;
+      text-align: center;
+      font-family: var(--cu-mono);
+      font-size: 7.5px;
+      letter-spacing: 0.09em;
+      color: var(--cu-bone);
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      pointer-events: none;
+    }
+
+    /* ---- Arrange popover ---- */
+
+    .cu-arrange-panel .cu-arrange-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .cu-arrange-panel .cu-arrange-row:last-child {
+      margin-bottom: 0;
+    }
+
+    .cu-arrange-row label {
+      flex: 0 0 38px;
+      font-family: var(--cu-mono);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--cu-dust);
+    }
+
+    .cu-arrange-row select {
+      flex: 1 1 auto;
+      min-width: 0;
+      box-sizing: border-box;
+      height: var(--cu-h-ctl);
+      padding: 0 22px 0 8px;
+      border: 1px solid var(--cu-seam-strong);
+      border-radius: var(--cu-radius);
+      background-color: var(--cu-raise);
+      color: var(--cu-bone);
+      font-family: var(--cu-body);
+      font-size: 10.5px;
+      -webkit-appearance: none;
+      appearance: none;
+      background-image: linear-gradient(45deg, transparent 50%, var(--cu-dust) 50%),
+                        linear-gradient(135deg, var(--cu-dust) 50%, transparent 50%);
+      background-position: calc(100% - 12px) calc(50% + 1px), calc(100% - 8px) calc(50% + 1px);
+      background-size: 4px 4px, 4px 4px;
+      background-repeat: no-repeat;
+    }
+
+    .cu-arrange-row select:disabled {
+      opacity: 0.4;
+    }
+
+    /* ---- Motion ----
+       Three moments only: results arriving, a card settling from provisional
+       to checked, and a caret turning. Nothing else moves. */
+
+    @keyframes cu-rise {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .cu-results .cu-item {
+      animation: cu-rise 220ms cubic-bezier(0.2, 0.7, 0.3, 1) backwards;
+      animation-delay: calc(var(--cu-i, 1) * 18ms);
+    }
+
+    /* Same page, fresher data: update in place. Only a card that actually
+       changed state still announces itself. */
+    .cu-results.cu-quiet .cu-item:not(.cu-settled) {
+      animation: none;
+    }
+
+    @keyframes cu-settle {
+      0% { border-color: var(--cu-red); background: rgba(255, 75, 62, 0.07); }
+      100% { border-color: var(--cu-seam); background: rgba(0, 0, 0, 0.18); }
+    }
+
+    .cu-item.cu-settled {
+      animation: cu-rise 220ms cubic-bezier(0.2, 0.7, 0.3, 1) backwards,
+                 cu-settle 900ms ease-out 220ms backwards;
+    }
+
+    @keyframes cu-ignite {
+      0% { transform: scale(0.4); opacity: 0; }
+      60% { transform: scale(1.25); opacity: 1; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+
+    .cu-item.cu-settled .cu-ver-label[data-role="new"]::before {
+      animation: cu-ignite 420ms cubic-bezier(0.2, 0.8, 0.3, 1) 260ms backwards;
+    }
+
+    /* ---- Focus + reduced motion ---- */
+
+    .cu-root :focus-visible,
+    .cu-lightbox :focus-visible {
+      outline: 1px solid var(--cu-red);
+      outline-offset: 2px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .cu-root *,
+      .cu-root *::before,
+      .cu-root *::after,
+      .cu-lightbox,
+      .cu-lightbox * {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-delay: 0ms !important;
+      }
+    }
+
+    /* ---- Narrow sidebar ---- */
 
     @media (max-width: 600px) {
       .cu-item {
@@ -2284,7 +3036,7 @@ function injectStyles() {
       }
 
       .cu-ver-row {
-        grid-template-columns: 54px 1fr;
+        grid-template-columns: 68px 1fr;
       }
 
       .cu-ver-date,
@@ -2292,14 +3044,9 @@ function injectStyles() {
         display: none;
       }
 
-      .cu-filter-slot,
-      .cu-filters select,
-      .cu-toggle {
-        flex-basis: 100%;
-      }
     }
 
-    /* ---- Lightbox (appended to body, not inside .cu-root) ---- */
+    /* ---- Lightbox (appended to body, outside .cu-root) ---- */
 
     .cu-lightbox {
       position: fixed;
@@ -2319,14 +3066,14 @@ function injectStyles() {
     .cu-lb-backdrop {
       position: absolute;
       inset: 0;
-      background: rgba(0, 0, 0, 0.82);
+      background: rgba(8, 8, 10, 0.85);
     }
 
     .cu-lb-container {
       position: relative;
-      background: rgba(26, 34, 53, 0.85);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 14px;
+      background: #1b1b20;
+      border: 1px solid #40404b;
+      border-radius: 8px;
       max-width: 92vw;
       max-height: 92vh;
       overflow-y: auto;
@@ -2334,34 +3081,39 @@ function injectStyles() {
       flex-direction: column;
       font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
       box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
     }
 
     .cu-lb-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 14px 18px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 13px 16px;
+      border-bottom: 1px solid #2e2e36;
       flex-shrink: 0;
     }
 
     .cu-lb-title {
-      color: #e4eaf5;
-      font-size: 15px;
-      font-weight: 600;
+      color: #eceae4;
+      font-family: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+      font-size: 14px;
+      font-weight: 500;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       min-width: 0;
     }
 
+    .cu-lb-title .cu-creator {
+      color: #6a6772;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      font-size: 11px;
+    }
+
     .cu-lb-close {
       background: none;
       border: none;
-      color: #6a7a95;
-      font-size: 26px;
+      color: #6a6772;
+      font-size: 24px;
       cursor: pointer;
       padding: 0 2px;
       line-height: 1;
@@ -2370,19 +3122,15 @@ function injectStyles() {
     }
 
     .cu-lb-close:hover {
-      color: #e4eaf5;
+      color: #eceae4;
     }
 
     .cu-lb-body {
-      padding: 18px;
+      padding: 16px;
       display: flex;
-      gap: 18px;
+      gap: 16px;
       justify-content: center;
       flex-wrap: wrap;
-    }
-
-    .cu-lb-body:not(.cu-lb-compare) {
-      justify-content: center;
     }
 
     .cu-lb-card {
@@ -2395,16 +3143,21 @@ function injectStyles() {
     }
 
     .cu-lb-label {
-      font-size: 9px;
-      font-weight: 700;
+      font-family: "IBM Plex Mono", Consolas, ui-monospace, monospace;
+      font-size: 8.5px;
+      font-weight: 500;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: #5a6a85;
+      letter-spacing: 0.12em;
+      color: #6a6772;
+    }
+
+    .cu-lb-label[data-role="new"] {
+      color: #f2857b;
     }
 
     .cu-lb-vname {
       font-size: 12px;
-      color: #b0c4e0;
+      color: #96939c;
       text-align: center;
       max-width: 400px;
       overflow: hidden;
@@ -2413,15 +3166,17 @@ function injectStyles() {
     }
 
     .cu-lb-base {
-      font-size: 10px;
-      color: #6a7a95;
+      font-family: "IBM Plex Mono", Consolas, ui-monospace, monospace;
+      font-size: 9.5px;
+      color: #6a6772;
     }
 
     .cu-lb-card img,
     .cu-lb-card video {
       max-width: min(420px, 42vw);
       max-height: 65vh;
-      border-radius: 10px;
+      border-radius: 5px;
+      border: 1px solid #2e2e36;
       object-fit: contain;
       background: rgba(0, 0, 0, 0.3);
     }

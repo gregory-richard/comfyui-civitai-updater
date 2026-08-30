@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from comfy_updater.routes import _normalize_archive_payload
+from comfy_updater.config_store import ConfigStore
+from comfy_updater.constants import CACHE_SCHEMA_VERSION
+from comfy_updater.routes import (
+    _normalize_archive_payload,
+    _normalize_config_payload,
+    _seed_items_from_cache,
+)
 from comfy_updater.updater_service import _version_date
 
 
@@ -14,6 +22,64 @@ class RouteAndVersionHelperTests(unittest.TestCase):
         })
         self.assertEqual("42", model_id)
         self.assertEqual(["a", "b"], version_ids)
+
+    def test_normalize_config_payload_keeps_custom_paths_partial(self) -> None:
+        incoming = _normalize_config_payload({
+            "customPaths": {"checkpoint": "C:/a;C:/b", "lora": []},
+        })
+
+        self.assertEqual(
+            {"checkpoint": ["C:/a", "C:/b"], "lora": []},
+            incoming["customPaths"],
+        )
+        # Model types the client did not send must stay absent so their
+        # stored custom paths survive a partial settings sync.
+        self.assertNotIn("embedding", incoming["customPaths"])
+
+    def test_partial_settings_sync_preserves_other_custom_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = ConfigStore(Path(tmpdir))
+            store.update({"customPaths": {"embedding": ["C:/embeddings"]}})
+
+            # Simulates the frontend sync payload, which omits "embedding".
+            incoming = _normalize_config_payload({
+                "customPaths": {"checkpoint": ["C:/checkpoints"], "lora": [], "vae": [], "unet": []},
+            })
+            updated = store.update(incoming)
+
+            self.assertEqual(["C:\\embeddings"], updated["customPaths"]["embedding"])
+            self.assertEqual(["C:\\checkpoints"], updated["customPaths"]["checkpoint"])
+
+    def test_seed_items_from_cache_filters_types_and_marks_items(self) -> None:
+        cache = {
+            "schemaVersion": CACHE_SCHEMA_VERSION,
+            "items": [
+                {
+                    "modelPath": "C:\\models\\a.safetensors",
+                    "modelType": "lora",
+                    "modelUrl": "https://civitai.com/models/1",
+                    "remoteVersions": [],
+                },
+                {"modelPath": "C:\\models\\b.safetensors", "modelType": "checkpoint", "remoteVersions": []},
+            ],
+        }
+
+        seeded = _seed_items_from_cache(cache, ["lora"])
+
+        self.assertEqual(1, len(seeded))
+        self.assertTrue(seeded[0]["_seeded"])
+        self.assertEqual("C:\\models\\a.safetensors", seeded[0]["modelPath"])
+        self.assertEqual("https://civitai.red/models/1", seeded[0]["modelUrl"])
+
+    def test_seed_items_from_cache_rejects_missing_or_outdated_cache(self) -> None:
+        self.assertEqual([], _seed_items_from_cache(None, ["lora"]))
+        self.assertEqual(
+            [],
+            _seed_items_from_cache(
+                {"schemaVersion": CACHE_SCHEMA_VERSION - 1, "items": [{"modelType": "lora"}]},
+                ["lora"],
+            ),
+        )
 
     def test_version_date_prefers_published_and_falls_back_to_created(self) -> None:
         self.assertEqual(

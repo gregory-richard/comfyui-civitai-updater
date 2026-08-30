@@ -7,10 +7,12 @@ from comfy_updater.constants import MODEL_BY_ID_URL, MODEL_VERSION_BY_ID_URL, VE
 
 
 class CivitaiClientUrlTests(unittest.TestCase):
-    def test_api_urls_remain_on_civitai_com(self) -> None:
-        self.assertEqual("https://civitai.com/api/v1/model-versions/by-hash", VERSION_BY_HASH_URL)
-        self.assertEqual("https://civitai.com/api/v1/models", MODEL_BY_ID_URL)
-        self.assertEqual("https://civitai.com/api/v1/model-versions", MODEL_VERSION_BY_ID_URL)
+    def test_api_urls_use_civitai_red(self) -> None:
+        # civitai.com API responses are SFW-filtered since the April 2026
+        # domain split; only civitai.red serves the full catalog.
+        self.assertEqual("https://civitai.red/api/v1/model-versions/by-hash", VERSION_BY_HASH_URL)
+        self.assertEqual("https://civitai.red/api/v1/models", MODEL_BY_ID_URL)
+        self.assertEqual("https://civitai.red/api/v1/model-versions", MODEL_VERSION_BY_ID_URL)
 
     def test_page_urls_always_use_civitai_red(self) -> None:
         # Test default initialization

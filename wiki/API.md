@@ -19,7 +19,8 @@ Request body fields:
 - `maxRetries`: integer (optional)
 - `requestDelayMs`: integer (optional)
 - `treatSidecarsAsInstalled`: boolean (optional, defaults to `true`)
-- `customPaths`: object keyed by model type (`checkpoint|lora|vae|unet`)
+- `matureMode`: `show` | `blur` | `hide` (optional, defaults to `show`)
+- `customPaths`: object keyed by model type (`checkpoint|lora|vae|unet|embedding`); only the keys present in the request are updated
 
 Response:
 
@@ -72,26 +73,24 @@ Summary shape depends on mode:
 
 ## `GET /civitai-updater/jobs/{job_id}/items`
 
-Returns paged job items.
+Query parameters:
 
-Query params:
+- `offset`, `limit`: paging over cards (limit is capped at 500)
+- `mode`: `updates` to list only models with a newer release
+- `modelType`, `baseModel`: repeatable filters
+- `showHidden`: `1` to include releases you hid
+- `sort`: `name` | `name-desc` | `type` | `latest-date` | `latest-date-desc` | `behind`
+- `groupBy`, `thenBy`: `none` | `type` | `baseFamily` (a value equal to `groupBy` is ignored)
+- `collapsed`: repeatable group key, either `Checkpoint` or `Checkpoint||SDXL`
+- `mature`: `show` | `blur` | `hide`; omitted falls back to the stored setting
 
-- `offset`: integer, default `0`
-- `limit`: integer, default `25`
-- `mode`: optional, supports `updates`
-- `showHidden`: optional `0|1`
-- `modelType`: optional repeated parameter for multi-select filtering
-- `baseModel`: optional repeated parameter for multi-select filtering
+Response adds `groups` (the outline with counts for the whole result set),
+`grouping`, `startsMidPrimary` / `startsMidSecondary` (whether the page opens
+inside a group that began earlier), `matureHidden` and `matureMode`. Each item
+carries `groupPrimary` and `groupSecondary`.
 
-Response fields:
-
-- `jobId`
-- `totalItems`
-- `offset`
-- `limit`
-- `mode`
-- `facets`
-- `items`
+Base response fields: `jobId`, `totalItems`, `offset`, `limit`, `mode`,
+`facets`, `items`.
 
 Grouped items now include:
 

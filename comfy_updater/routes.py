@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from aiohttp import web
 
 from .constants import CACHE_SCHEMA_VERSION, SUPPORTED_MODEL_TYPES
+from .jobs import MATURE_MODES, _normalize_cached_item_urls
 from .path_resolver import normalize_model_types
 from .sidecar import read_json, write_json
 
@@ -61,6 +63,8 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
             "scan",
             lambda progress, item, control: updater_service.run_scan(payload, progress, item, control),
         )
+        if not job:
+            return web.json_response({"error": "A job is already running."}, status=409)
         return web.json_response({"jobId": job.id})
 
     @routes.post("/civitai-updater/jobs/check-updates")
@@ -71,6 +75,15 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
         progress_path = config_store.data_dir / "progress.json"
         cache_path = config_store.data_dir / "last_check.json"
         item_count = 0
+        # The runner thread can emit items before job_manager.start() returns,
+        # so it reads the job record from this holder instead of a closure
+        # variable that may not be assigned yet.
+        job_holder: dict = {}
+
+        # Seed the job with the previous check's results so the panel keeps
+        # showing them (marked provisional) while models are re-checked.
+        cache_data = await asyncio.to_thread(read_json, cache_path)
+        seed_items = _seed_items_from_cache(cache_data, payload.get("modelTypes"))
 
         def runner(progress, item_cb, control):
             nonlocal item_count
@@ -79,7 +92,8 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
                 nonlocal item_count
                 item_cb(item)
                 item_count += 1
-                if item_count % 5 == 0:
+                job_ref = job_holder.get("job")
+                if job_ref is not None and item_count % 5 == 0:
                     _write_progress(progress_path, accumulated_items=None, job_ref=job_ref)
 
             summary, items = updater_service.run_check_updates(
@@ -96,7 +110,10 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
             progress_path.unlink(missing_ok=True)
             return summary, items
 
-        job_ref = job_manager.start("check-updates", runner)
+        job_ref = job_manager.start("check-updates", runner, seed_items=seed_items)
+        if not job_ref:
+            return web.json_response({"error": "A job is already running."}, status=409)
+        job_holder["job"] = job_ref
         _write_progress(progress_path, accumulated_items=None, job_ref=job_ref)
         return web.json_response({"jobId": job_ref.id})
 
@@ -123,7 +140,11 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
 
         cache_path = config_store.data_dir / "last_check.json"
         data = read_json(cache_path)
-        current_paths, sidecar_warnings = updater_service.inspect_current_files()
+        # The inspection walks every model root on disk — keep it off the
+        # server event loop so large libraries don't stall other requests.
+        current_paths, sidecar_warnings = await asyncio.to_thread(
+            updater_service.inspect_current_files
+        )
         if not data:
             return web.json_response({"data": None, "sidecarWarnings": sidecar_warnings})
         if int(data.get("schemaVersion") or 0) != CACHE_SCHEMA_VERSION:
@@ -178,24 +199,36 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
         base_models = _read_multi_query(request, "baseModel")
         show_hidden = request.query.get("showHidden", "0").lower() in ("1", "true", "yes")
         sort = request.query.get("sort", "").strip().lower() or None
+        group_by = request.query.get("groupBy", "").strip() or None
+        then_by = request.query.get("thenBy", "").strip() or None
+        collapsed = _read_multi_query(request, "collapsed")
+        mature = request.query.get("mature", "").strip().lower()
+        if mature not in MATURE_MODES:
+            mature = str(config_store.get().get("matureMode") or "show")
 
         result = job_manager.get_items(
             job_id, offset=offset, limit=limit, mode=mode,
             model_types=model_types, base_models=base_models, sort=sort, show_hidden=show_hidden,
+            group_by=group_by, then_by=then_by, mature=mature, collapsed=collapsed,
         )
         if not result:
             return web.json_response({"error": "job not found"}, status=404)
 
-        total_items, safe_offset, safe_limit, items, facets = result
         return web.json_response(
             {
                 "jobId": job_id,
-                "totalItems": total_items,
-                "offset": safe_offset,
-                "limit": safe_limit,
+                "totalItems": result["total"],
+                "offset": result["offset"],
+                "limit": result["limit"],
                 "mode": mode,
-                "facets": facets,
-                "items": items,
+                "facets": result["facets"],
+                "groups": result["groups"],
+                "grouping": result["grouping"],
+                "startsMidPrimary": result["startsMidPrimary"],
+                "startsMidSecondary": result["startsMidSecondary"],
+                "matureHidden": result["matureHidden"],
+                "matureMode": result["matureMode"],
+                "items": result["items"],
             }
         )
 
@@ -288,15 +321,21 @@ def _normalize_config_payload(payload: dict) -> dict:
         incoming["useCustomPaths"] = bool(payload.get("useCustomPaths"))
     if "treatSidecarsAsInstalled" in payload:
         incoming["treatSidecarsAsInstalled"] = bool(payload.get("treatSidecarsAsInstalled"))
+    if "matureMode" in payload:
+        incoming["matureMode"] = payload.get("matureMode")
 
     if "customPaths" in payload:
         custom = payload.get("customPaths")
         if isinstance(custom, dict):
+            # Only normalize the model types the client actually sent —
+            # filling in missing types as [] would silently wipe their
+            # stored custom paths on every settings sync.
             cleaned = {}
             for model_type in SUPPORTED_MODEL_TYPES:
-                entries = custom.get(model_type, [])
-                cleaned[model_type] = _normalize_paths_value(entries)
-            incoming["customPaths"] = cleaned
+                if model_type in custom:
+                    cleaned[model_type] = _normalize_paths_value(custom[model_type])
+            if cleaned:
+                incoming["customPaths"] = cleaned
 
     return incoming
 
@@ -308,6 +347,30 @@ def _normalize_paths_value(entries) -> list[str]:
     if isinstance(entries, list):
         return [item.strip() for item in entries if isinstance(item, str) and item.strip()]
     return []
+
+
+def _seed_items_from_cache(cache_data, model_types: list[str] | None) -> list[dict]:
+    """Build provisional seed items from a cached check for a new job.
+
+    Only items matching the requested model types are carried over, and each
+    is marked ``_seeded`` so the job can replace it once the file is
+    re-checked. An empty list is returned for missing or outdated caches.
+    """
+    if not isinstance(cache_data, dict):
+        return []
+    if int(cache_data.get("schemaVersion") or 0) != CACHE_SCHEMA_VERSION:
+        return []
+    allowed = set(model_types or [])
+    seeded: list[dict] = []
+    for item in cache_data.get("items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if allowed and item.get("modelType") not in allowed:
+            continue
+        entry = dict(_normalize_cached_item_urls(item))
+        entry["_seeded"] = True
+        seeded.append(entry)
+    return seeded
 
 
 def _write_progress(progress_path, *, accumulated_items, job_ref) -> None:

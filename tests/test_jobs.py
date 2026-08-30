@@ -149,9 +149,9 @@ class JobManagerTests(unittest.TestCase):
         ]
         self.archive_store.archive("m1", ["v-new-1"])
 
-        total, _, _, items, _ = self.manager.get_items("job-1", mode="updates", show_hidden=True)
-        self.assertEqual(1, total)
-        grouped = items[0]
+        result = self.manager.get_items("job-1", mode="updates", show_hidden=True)
+        self.assertEqual(1, result["total"])
+        grouped = result["items"][0]
         self.assertEqual("2026-03-05T00:00:00Z", grouped["newestLocalVersionDate"])
         self.assertEqual(["v-new-2"], [entry["versionId"] for entry in grouped["newVersions"]])
         self.assertEqual(["v-new-1"], [entry["versionId"] for entry in grouped["hiddenNewVersions"]])
@@ -208,16 +208,140 @@ class JobManagerTests(unittest.TestCase):
             ),
         ]
 
-        total, _, _, items, facets = self.manager.get_items(
+        result = self.manager.get_items(
             "job-1",
             mode="updates",
             model_types=["lora"],
             base_models=["Flux.1 D"],
         )
-        self.assertEqual(1, total)
-        self.assertEqual("m2", items[0]["modelId"])
-        self.assertEqual(["checkpoint", "lora"], facets["modelTypes"])
-        self.assertEqual(["Flux.1 D", "SDXL 1.0"], facets["baseModels"])
+        self.assertEqual(1, result["total"])
+        self.assertEqual("m2", result["items"][0]["modelId"])
+        self.assertEqual(["checkpoint", "lora"], result["facets"]["modelTypes"])
+        self.assertEqual(["Flux.1 D", "SDXL 1.0"], result["facets"]["baseModels"])
+
+    def test_start_refuses_second_concurrent_job(self) -> None:
+        import threading
+
+        release = threading.Event()
+        started = threading.Event()
+
+        def runner(progress, item_cb, control):  # noqa: ARG001
+            started.set()
+            release.wait(timeout=5)
+            return {}, []
+
+        first = self.manager.start("scan", runner)
+        self.assertIsNotNone(first)
+        self.assertTrue(started.wait(timeout=5))
+
+        second = self.manager.start("scan", runner)
+        self.assertIsNone(second)
+
+        release.set()
+
+    def test_seeded_items_are_replaced_when_fresh_results_arrive(self) -> None:
+        import threading
+        import time as time_module
+
+        seeded = [
+            {"modelPath": "C:\\models\\a.safetensors", "modelId": "m1", "_seeded": True},
+            {"modelPath": "C:\\models\\b.safetensors", "modelId": "m2", "_seeded": True},
+        ]
+        fresh_a = {"modelPath": "C:\\models\\A.safetensors", "modelId": "m1", "status": "ok"}
+        emitted = threading.Event()
+        release = threading.Event()
+
+        def runner(progress, item_cb, control):  # noqa: ARG001
+            item_cb(fresh_a)
+            emitted.set()
+            release.wait(timeout=5)
+            return {}, [fresh_a]
+
+        job = self.manager.start("check-updates", runner, seed_items=seeded)
+        self.assertIsNotNone(job)
+        self.assertTrue(emitted.wait(timeout=5))
+
+        with self.manager._lock:
+            paths = [item["modelPath"] for item in job.items]
+        # The fresh item replaces its seeded counterpart (case-insensitive),
+        # while untouched seeds keep showing.
+        self.assertIn("C:\\models\\A.safetensors", paths)
+        self.assertNotIn("C:\\models\\a.safetensors", paths)
+        self.assertIn("C:\\models\\b.safetensors", paths)
+
+        release.set()
+        for _ in range(100):
+            if job.status == "completed":
+                break
+            time_module.sleep(0.05)
+        self.assertEqual("completed", job.status)
+        # Completion keeps only the fresh results.
+        self.assertEqual([fresh_a], job.items)
+
+    def test_cancel_keeps_unreplaced_seeded_items(self) -> None:
+        import threading
+        import time as time_module
+
+        seeded = [
+            {"modelPath": "C:\\models\\a.safetensors", "modelId": "m1", "_seeded": True},
+            {"modelPath": "C:\\models\\b.safetensors", "modelId": "m2", "_seeded": True},
+        ]
+        fresh_a = {"modelPath": "C:\\models\\a.safetensors", "modelId": "m1", "status": "ok"}
+        emitted = threading.Event()
+        release = threading.Event()
+
+        def runner(progress, item_cb, control):  # noqa: ARG001
+            item_cb(fresh_a)
+            emitted.set()
+            release.wait(timeout=5)
+            return {"partial": True}, [fresh_a]
+
+        job = self.manager.start("check-updates", runner, seed_items=seeded)
+        self.assertIsNotNone(job)
+        self.assertTrue(emitted.wait(timeout=5))
+
+        self.manager.cancel(job.id)
+        release.set()
+        for _ in range(100):
+            if job.status == "cancelled":
+                break
+            time_module.sleep(0.05)
+        self.assertEqual("cancelled", job.status)
+
+        # The unreplaced seed survives the cancel; the fresh result stays.
+        paths = sorted(item["modelPath"] for item in job.items)
+        self.assertEqual(
+            ["C:\\models\\a.safetensors", "C:\\models\\b.safetensors"],
+            paths,
+        )
+        fresh = [item for item in job.items if not item.get("_seeded")]
+        self.assertEqual([fresh_a], fresh)
+
+    def test_finished_jobs_are_pruned(self) -> None:
+        from comfy_updater import jobs as jobs_module
+
+        for index in range(jobs_module._MAX_FINISHED_JOBS + 3):
+            record = JobRecord(
+                id=f"finished-{index}",
+                type="check-updates",
+                status="completed",
+                finishedAt=f"2026-01-{index + 1:02d}T00:00:00Z",
+            )
+            self.manager._jobs[record.id] = record
+
+        def runner(progress, item_cb, control):  # noqa: ARG001
+            return {}, []
+
+        job = self.manager.start("scan", runner)
+        self.assertIsNotNone(job)
+
+        # Only the newest _MAX_FINISHED_JOBS finished jobs survive the prune.
+        remaining = [job_id for job_id in self.manager._jobs if job_id.startswith("finished-")]
+        self.assertEqual(
+            [f"finished-{index}" for index in range(3, 8)],
+            sorted(remaining),
+        )
+        self.assertNotIn("job-1", self.manager._jobs)
 
     def test_grouping_aggregates_nsfw_flag(self) -> None:
         # Test grouped items
@@ -247,9 +371,9 @@ class JobManagerTests(unittest.TestCase):
                 nsfw=False,
             ),
         ]
-        total, _, _, items, _ = self.manager.get_items("job-1")
-        self.assertEqual(1, total)
-        self.assertTrue(items[0]["nsfw"])
+        result = self.manager.get_items("job-1")
+        self.assertEqual(1, result["total"])
+        self.assertTrue(result["items"][0]["nsfw"])
 
         # Test ungrouped items (no modelId/modelUrl)
         self.job.items = [
@@ -265,9 +389,9 @@ class JobManagerTests(unittest.TestCase):
                 "localPreviewType": "image",
             }
         ]
-        total, _, _, items, _ = self.manager.get_items("job-1")
-        self.assertEqual(1, total)
-        self.assertTrue(items[0]["nsfw"])
+        result = self.manager.get_items("job-1")
+        self.assertEqual(1, result["total"])
+        self.assertTrue(result["items"][0]["nsfw"])
 
 
 if __name__ == "__main__":

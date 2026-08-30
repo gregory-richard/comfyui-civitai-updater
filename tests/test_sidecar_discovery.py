@@ -73,6 +73,24 @@ class SidecarDiscoveryTests(unittest.TestCase):
                 {warning["code"] for warning in warnings},
             )
 
+    def test_non_object_json_sidecar_is_classified_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "list.civitai.info").write_text('[{"id": 456}]', encoding="utf-8")
+            (root / "string.civitai.info").write_text('"just text"', encoding="utf-8")
+            warnings = []
+
+            files = list_model_files(
+                {"lora": [root]}, include_sidecar_only=True, sidecar_warnings=warnings
+            )
+
+            self.assertEqual([], files)
+            self.assertEqual(2, len(warnings))
+            self.assertEqual(
+                {SIDECAR_ERROR_INVALID_JSON},
+                {warning["code"] for warning in warnings},
+            )
+
     def test_legacy_unicode_sidecars_are_discovered(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

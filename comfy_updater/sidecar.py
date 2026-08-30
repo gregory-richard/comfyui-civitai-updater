@@ -47,11 +47,16 @@ def read_json_diagnostic(path: Path) -> tuple[dict | None, str | None]:
         if _looks_like_safetensors(raw[:9], file_size):
             return None, SIDECAR_ERROR_SAFETENSORS
         try:
-            return json.loads(raw), None
+            payload = json.loads(raw)
         except UnicodeDecodeError:
             return None, SIDECAR_ERROR_INVALID_ENCODING
         except json.JSONDecodeError:
             return None, SIDECAR_ERROR_INVALID_JSON
+        if not isinstance(payload, dict):
+            # Valid JSON but not an object (e.g. a list or bare string) —
+            # callers rely on dict semantics, so classify it as invalid.
+            return None, SIDECAR_ERROR_INVALID_JSON
+        return payload, None
     except OSError:
         return None, SIDECAR_ERROR_READ
 
