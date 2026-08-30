@@ -424,8 +424,27 @@ class UpdaterService:
         primary_new_version = new_versions[0] if new_versions else {}
         local_name = version_data.get("name", "")
         local_preview_url, local_preview_type = _first_preview(version_data)
-        preview_url = primary_new_version.get("previewUrl", "") or local_preview_url
-        preview_type = primary_new_version.get("previewType", "image") or local_preview_type
+        # Sidecars written while the API was SFW-filtered often carry empty
+        # image lists. Backfill the local preview from the freshly fetched
+        # remote data for the same version so those models heal on re-check.
+        if not local_preview_url and local_id:
+            local_remote = next(
+                (entry for entry in remote_versions if entry.get("versionId") == local_id),
+                None,
+            )
+            if local_remote and local_remote.get("previewUrl"):
+                local_preview_url = local_remote["previewUrl"]
+                local_preview_type = local_remote.get("previewType") or "image"
+                if not preview_path.exists():
+                    _download_preview_media(client, preview_path, local_preview_url, local_preview_type)
+        # Pick url and type as a pair so a local video preview keeps its
+        # "video" type instead of inheriting the empty remote entry's default.
+        if primary_new_version.get("previewUrl"):
+            preview_url = primary_new_version.get("previewUrl", "")
+            preview_type = primary_new_version.get("previewType") or "image"
+        else:
+            preview_url = local_preview_url
+            preview_type = local_preview_type
 
         model_url = client.model_page_url(model_id, nsfw=is_nsfw)
         version_url = primary_new_version.get("versionUrl", "") or client.version_page_url(model_id, local_id, nsfw=is_nsfw)
@@ -588,6 +607,15 @@ def _download_preview_if_needed(
         return
     if not force and preview_path.exists():
         return
+    _download_preview_media(client, preview_path, preview_url, preview_type)
+
+
+def _download_preview_media(
+    client: CivitaiClient,
+    preview_path: Path,
+    preview_url: str,
+    preview_type: str,
+) -> None:
     if preview_type == "video":
         client.download_video_first_frame_as_png(preview_url, preview_path)
         return

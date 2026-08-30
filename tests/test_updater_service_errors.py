@@ -76,6 +76,31 @@ class MetadataOnlyClient:
         return f"https://civitai.red/models/{model_id}?modelVersionId={version_id}"
 
 
+class PreviewBackfillClient(MetadataOnlyClient):
+    def __init__(self):
+        super().__init__()
+        self.downloaded = []
+
+    def get_model_versions_for_model(self, model_id):  # noqa: ARG002
+        return (
+            "artist",
+            [
+                {
+                    "id": 456,
+                    "name": "Local Version",
+                    "baseModel": "SDXL 1.0",
+                    "publishedAt": "2026-03-05T00:00:00Z",
+                    "images": [{"type": "image", "url": "https://img.example/local.jpeg"}],
+                },
+            ],
+            False,
+        )
+
+    def download_image_as_png(self, url, target_path, max_bytes=10_000_000):  # noqa: ARG002
+        self.downloaded.append((url, target_path))
+        return True
+
+
 class UpdaterServiceErrorTests(unittest.TestCase):
     def test_model_lookup_failure_returns_error_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -169,6 +194,43 @@ class UpdaterServiceErrorTests(unittest.TestCase):
             self.assertEqual(str(info_path), item["modelPath"])
             self.assertTrue(item["metadataOnly"])
             self.assertEqual("Local Version Refreshed", read_json(info_path)["name"])
+
+    def test_check_backfills_local_preview_from_remote_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "example.safetensors"
+            model_path.write_bytes(b"weights")
+            preview_path = Path(tmpdir) / "example.preview.png"
+            # A sidecar written while the API was SFW-filtered: no images.
+            write_json(
+                info_sidecar_path(model_path),
+                {
+                    "id": 456,
+                    "modelId": 123,
+                    "name": "Local Version",
+                    "baseModel": "SDXL 1.0",
+                    "publishedAt": "2026-03-05T00:00:00Z",
+                    "model": {"name": "Example Model"},
+                    "images": [],
+                },
+            )
+            client = PreviewBackfillClient()
+
+            item = UpdaterService(None)._process_one(
+                client=client,
+                model_path=model_path,
+                model_type="lora",
+                mode="check",
+                refetch_metadata=False,
+                force_rehash=False,
+            )
+
+            self.assertEqual("ok", item["status"])
+            self.assertEqual("https://img.example/local.jpeg", item["localPreviewUrl"])
+            self.assertEqual("image", item["localPreviewType"])
+            self.assertEqual(
+                [("https://img.example/local.jpeg", preview_path)],
+                client.downloaded,
+            )
 
     def test_current_file_paths_follow_sidecar_setting_and_validity(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

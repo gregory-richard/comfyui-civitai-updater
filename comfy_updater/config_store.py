@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "useExtraModelPaths": True,
     "useCustomPaths": True,
     "treatSidecarsAsInstalled": True,
+    "matureMode": "show",
     "customPaths": {model_type: [] for model_type in SUPPORTED_MODEL_TYPES},
 }
 
@@ -58,6 +59,7 @@ class ConfigStore:
             "useExtraModelPaths",
             "useCustomPaths",
             "treatSidecarsAsInstalled",
+            "matureMode",
         ):
             if key in incoming:
                 merged[key] = incoming[key]
@@ -92,6 +94,8 @@ class ConfigStore:
         merged["useExtraModelPaths"] = bool(merged["useExtraModelPaths"])
         merged["useCustomPaths"] = bool(merged["useCustomPaths"])
         merged["treatSidecarsAsInstalled"] = bool(merged["treatSidecarsAsInstalled"])
+        if merged["matureMode"] not in ("show", "blur", "hide"):
+            merged["matureMode"] = "show"
 
         return merged
 
