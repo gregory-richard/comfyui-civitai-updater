@@ -62,8 +62,11 @@ Requires Python 3.9+. Pulls in `requests`, `Pillow`, and `imageio-ffmpeg`
   Results from the previous check stay on screen, marked provisional, and each
   card refreshes in place as its model is re-checked. Stopping the job keeps
   what it had already found.
-- **Scan Metadata Only** — refreshes `.civitai.info` sidecars and preview
-  images without comparing versions.
+- **Fetch Missing Metadata** — downloads `.civitai.info` sidecars and preview
+  images for models that are missing them. Files that already have metadata are
+  skipped and nothing is compared for updates, so it is the cheap way to
+  populate names, base models, and thumbnails after adding a batch of models.
+  Tick **Refetch metadata that already exists** to re-pull the ones you have.
 - Long jobs can be paused, resumed, or stopped, and survive a page reload.
 - **Arrange** groups the list two levels deep and sorts within it. The default
   is model type, then base model, sorted A–Z; sort by **Furthest behind** to

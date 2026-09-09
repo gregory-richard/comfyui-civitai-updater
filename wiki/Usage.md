@@ -22,14 +22,19 @@ Go to `Settings -> Civitai Updater`:
 4. Use the multi-select `Types` and `Bases` filters, plus `Show hidden`, to narrow the result list.
 5. Use `Pause/Resume` or `Stop` for long jobs.
 
-## 4. Scan workflow (Advanced)
+## 4. Metadata workflow (Advanced)
 
-Run `Scan Metadata Only`.
+Run `Fetch Missing Metadata`.
 
-- Scan only refreshes metadata sidecars.
-- Scan report is compact (`total/refreshed/skipped/notFound/errors`).
-- Scan does not fill update cards.
-- After scan, run `Check for Updates` to see updates.
+- Downloads `.civitai.info` sidecars and preview images only.
+- Models that already have a sidecar are skipped, unless `Refetch metadata that
+  already exists` is ticked — that re-pulls them by sidecar version ID, with no
+  re-hashing.
+- Never queries the version list, so it never reports updates and never fills
+  update cards.
+- Report is compact (`total/refreshed/skipped/notFound/errors`).
+- Use it to populate names, base models, and thumbnails after adding a batch of
+  models, then run `Check for Updates` to see what is outdated.
 
 ## 5. Pagination and streaming
 
