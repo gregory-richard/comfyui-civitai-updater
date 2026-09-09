@@ -9,6 +9,7 @@ const TAB_ICON_URL = new URL("./icon-monochrome.svg", import.meta.url).href;
 const MODEL_TYPES = ["checkpoint", "lora", "vae", "unet", "embedding"];
 const PAGE_SIZES = [25, 50, 100];
 const POLL_MS = 800;
+const ETA_SMOOTHING = 0.25;
 
 const SETTINGS = {
   apiKey: "CivitaiUpdater.APIKey",
@@ -52,6 +53,8 @@ const state = {
   currentProgress: 0,
   currentTotal: 0,
   currentItemCount: 0,
+  etaSecPerItem: null,
+  etaLastSample: null,
   pollTimer: null,
   lastStatus: "",
   lastItemCount: -1,
@@ -179,8 +182,8 @@ async function renderTab(el) {
           <p class="cu-option-hint">Re-identify models from scratch. Use after replacing files.</p>
           <label class="cu-option">
             <input id="cu-refetch" type="checkbox">
-            <span>Refetch existing metadata during scans</span>
-            <span class="cu-info-trigger cu-tooltip" data-tooltip="During metadata scans, re-fetch info from Civitai for models that already have a .civitai.info file. Uses sidecar version IDs for speed.">ⓘ</span>
+            <span>Refetch metadata that already exists</span>
+            <span class="cu-info-trigger cu-tooltip" data-tooltip="Makes Fetch Missing Metadata re-pull info from Civitai for models that already have a .civitai.info file, instead of skipping them. Uses sidecar version IDs, so no re-hashing.">ⓘ</span>
           </label>
           <div class="cu-divider"></div>
           <div class="cu-head">
@@ -195,14 +198,15 @@ async function renderTab(el) {
 
     <section class="cu-card">
       <div class="cu-action-bar">
-        <button id="cu-check" class="cu-btn cu-btn-primary cu-tooltip" data-tooltip="Scan local files and compare with Civitai to check for newer versions.">Check for Updates</button>
-        <button id="cu-scan" class="cu-btn cu-btn-outline cu-tooltip" data-tooltip="Scan files and download/refresh sidecar metadata only (no update comparison).">Scan Metadata Only</button>
+        <button id="cu-check" class="cu-btn cu-btn-primary cu-btn-lead cu-tooltip" data-tooltip="Scan local files and compare with Civitai to check for newer versions.">Check for Updates</button>
+        <button id="cu-scan" class="cu-btn cu-btn-ghost cu-tooltip" data-tooltip="Download missing .civitai.info sidecars and preview images. Files that already have metadata are skipped, and nothing is compared for updates.">Fetch Missing Metadata</button>
       </div>
       <div id="cu-cache-info" class="cu-cache-info"></div>
       <div id="cu-sidecar-warnings" class="cu-sidecar-warnings"></div>
       <div id="cu-progress-wrap" class="cu-progress-wrap" style="display:none">
         <div class="cu-progress"><div id="cu-progress-fill" class="cu-progress-fill"></div></div>
         <span id="cu-progress-text" class="cu-progress-pct"></span>
+        <span id="cu-progress-eta" class="cu-progress-eta"></span>
       </div>
       <div id="cu-status" class="cu-status"></div>
       <div id="cu-job-controls" class="cu-job-controls" style="display:none">
@@ -243,6 +247,7 @@ async function renderTab(el) {
   state.progressWrapEl = root.querySelector("#cu-progress-wrap");
   state.progressFillEl = root.querySelector("#cu-progress-fill");
   state.progressTextEl = root.querySelector("#cu-progress-text");
+  state.progressEtaEl = root.querySelector("#cu-progress-eta");
   state.scanReportEl = root.querySelector("#cu-scan-report");
   state.checkSummaryEl = root.querySelector("#cu-check-summary");
   state.filterTypeEl = root.querySelector("#cu-filter-type");
@@ -470,6 +475,7 @@ async function startJob(endpoint, type) {
     state.currentItemCount = 0;
     state.lastStatus = "";
     state.lastItemCount = -1;
+    resetEta();
     if (type === "check-updates") {
       state.checkJobId = data.jobId;
       state.cachedJobId = data.jobId;
@@ -543,6 +549,7 @@ function pollJob(jobId) {
       state.currentProgress = progress;
       state.currentTotal = total;
       state.currentItemCount = itemCount;
+      sampleEta(progress, total, status);
       updateProgress(progress, total, true);
       renderProgressCounts();
       updateControlButtons();
@@ -600,6 +607,7 @@ function pollJob(jobId) {
         } else {
           setStatus("Scan complete");
         }
+        resetEta();
         updateProgress(progress, total, false);
         state.currentJobId = null;
         state.currentJobType = null;
@@ -625,6 +633,7 @@ function pollJob(jobId) {
       state.currentProgress = 0;
       state.currentTotal = 0;
       state.currentItemCount = 0;
+      resetEta();
       updateProgress(0, 0, false);
       updateControlButtons();
       setStatus(`Poll error: ${error.message}`);
@@ -1275,6 +1284,60 @@ function selectedTypes() {
   return selected;
 }
 
+function resetEta() {
+  state.etaSecPerItem = null;
+  state.etaLastSample = null;
+}
+
+/* Track a smoothed seconds-per-file rate. Per-file cost swings hard \u2014 a cached
+   sidecar is instant, hashing a 6GB checkpoint is not \u2014 so the raw rate is fed
+   through an EWMA instead of being used directly. */
+function sampleEta(current, total, status) {
+  if (status === "paused") {
+    // Drop the anchor so the paused stretch is never counted as work time.
+    state.etaLastSample = null;
+    return;
+  }
+  if (!total || current >= total) return;
+
+  const now = Date.now();
+  const prev = state.etaLastSample;
+  if (!prev) {
+    state.etaLastSample = { at: now, done: current };
+    return;
+  }
+  const finished = current - prev.done;
+  if (finished <= 0) return; // Still on the same file \u2014 keep the current estimate.
+
+  const secPerItem = (now - prev.at) / 1000 / finished;
+  state.etaLastSample = { at: now, done: current };
+  state.etaSecPerItem =
+    state.etaSecPerItem === null
+      ? secPerItem
+      : ETA_SMOOTHING * secPerItem + (1 - ETA_SMOOTHING) * state.etaSecPerItem;
+}
+
+function etaSecondsRemaining(current, total) {
+  if (state.etaSecPerItem === null || !total || current >= total) return null;
+  const budget = state.etaSecPerItem * (total - current);
+  // Subtract time already burned on the in-flight file so the estimate ticks down
+  // between completions instead of sitting still.
+  const inFlight = state.etaLastSample ? (Date.now() - state.etaLastSample.at) / 1000 : 0;
+  return Math.max(0, budget - inFlight);
+}
+
+function formatEta(seconds) {
+  if (seconds === null) return "";
+  const s = Math.round(seconds);
+  if (s < 10) return "finishing up";
+  if (s < 60) return `~${s}s left`;
+  const minutes = Math.floor(s / 60);
+  if (minutes < 10) return s % 60 ? `~${minutes}m ${s % 60}s left` : `~${minutes}m left`;
+  if (minutes < 60) return `~${minutes}m left`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 ? `~${hours}h ${minutes % 60}m left` : `~${hours}h left`;
+}
+
 function updateProgress(current, total, visible) {
   if (!state.progressWrapEl || !state.progressFillEl || !state.progressTextEl) return;
   state.progressWrapEl.style.display = visible ? "" : "none";
@@ -1283,6 +1346,16 @@ function updateProgress(current, total, visible) {
   const pct = safeTotal > 0 ? Math.min(100, Math.round((safeCurrent / safeTotal) * 100)) : 0;
   state.progressFillEl.style.width = `${pct}%`;
   state.progressTextEl.textContent = safeTotal > 0 ? `${pct}%` : "";
+
+  if (!state.progressEtaEl) return;
+  if (!visible || safeTotal <= 0) {
+    state.progressEtaEl.textContent = "";
+  } else if (state.currentJobStatus === "paused") {
+    state.progressEtaEl.textContent = "paused";
+  } else {
+    const remaining = etaSecondsRemaining(safeCurrent, safeTotal);
+    state.progressEtaEl.textContent = remaining === null ? "estimating\u2026" : formatEta(remaining);
+  }
 }
 
 function setStatus(message) {
@@ -1735,15 +1808,28 @@ function injectStyles() {
       box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
     }
 
-    .cu-btn-outline {
-      background: var(--cu-raise);
-      border-color: var(--cu-seam-strong);
+    /* Lead action \u2014 the update check is the main thing to do in this panel. */
+    .cu-btn-lead {
+      height: 34px;
+      font-size: 12.5px;
+      letter-spacing: 0.02em;
+    }
+
+    /* Quiet utility action, deliberately subordinate to the lead button. */
+    .cu-btn-ghost {
+      height: var(--cu-h-ctl);
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 500;
+      background: transparent;
+      border-color: var(--cu-seam);
       color: var(--cu-ash);
     }
 
-    .cu-btn-outline:hover {
-      color: var(--cu-bone);
+    .cu-btn-ghost:hover {
       background: var(--cu-raise);
+      border-color: var(--cu-seam-strong);
+      color: var(--cu-bone);
     }
 
     .cu-btn-danger {
@@ -1784,15 +1870,9 @@ function injectStyles() {
 
     .cu-action-bar {
       display: grid;
-      grid-template-columns: 1.12fr 1fr;
+      grid-template-columns: 1fr;
       gap: 6px;
       margin-bottom: 9px;
-    }
-
-    @container (max-width: 330px) {
-      .cu-action-bar {
-        grid-template-columns: 1fr;
-      }
     }
 
     .cu-job-controls {
@@ -1831,6 +1911,16 @@ function injectStyles() {
       color: var(--cu-ash);
       min-width: 30px;
       text-align: right;
+    }
+
+    .cu-progress-eta {
+      font-family: var(--cu-mono);
+      font-size: 10px;
+      color: var(--cu-ash);
+      opacity: 0.75;
+      min-width: 84px;
+      text-align: right;
+      white-space: nowrap;
     }
 
     /* ---- Cache line + status pills ---- */
