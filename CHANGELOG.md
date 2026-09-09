@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.7.0] - 2026-09-09
+
+### Added
+- The progress bar now carries a time estimate alongside the percentage. Per-file
+  cost varies enormously - a cached sidecar returns instantly, hashing a 6GB
+  checkpoint does not - so the rate is smoothed through a moving average rather
+  than a naive elapsed-over-done average. The estimate ticks down between file
+  completions instead of freezing during a long hash, excludes time spent paused,
+  and reads `estimating...` until the first file lands.
+
+### Improved
+- **Scan Metadata Only** is now **Fetch Missing Metadata**, naming what the button
+  is for rather than what it does not do. Its tooltip says that files with
+  existing metadata are skipped and that nothing is compared for updates.
+- The two action buttons were a matched pair on a grid, which read as two co-equal
+  primary actions. **Check for Updates** now leads at full width, and the metadata
+  fetch sits under it as a quiet utility action.
+- The refetch option is now **Refetch metadata that already exists** and names the
+  button it modifies, instead of referring to "scans" generically.
+
 ## [1.6.0] - 2026-08-30
 
 ### Added
