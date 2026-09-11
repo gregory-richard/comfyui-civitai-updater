@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.8.0] - 2026-09-11
+
+### Fixed
+- A model that Civitai has removed (404) or refuses without an API key (401/403) is
+  reported as an error item during an update check instead of quietly passing as
+  up to date. The message says which it was.
+- A local version whose sidecar carries no release date no longer turns every other
+  release into a `NEW` row. The date is taken from Civitai's own entry for that
+  version; when even that is missing, nothing is claimed as new.
+- Re-checking a subset of model types no longer wipes the other types from the
+  saved results. The check replaces only the types it ran over, the rest are
+  carried over, and the "changes detected" pill stops flagging every unchecked
+  model as newly added.
+- The panel recovers when ComfyUI is restarted underneath it: a job the server
+  no longer knows is dropped and the last saved results are reloaded, instead of
+  every request failing until the page is refreshed.
+- Copying a file path works over plain HTTP (a LAN address, for example), where
+  the browser clipboard API is unavailable and the click used to throw.
+- A `config.json` or `archived_updates.json` that fails to parse is moved aside
+  as `*.corrupt-<timestamp>` before defaults are written, so an API key, custom
+  paths, or hidden releases can be recovered by hand rather than being lost.
+- The lightbox no longer leaks a keyboard listener each time it is closed with
+  the button or backdrop.
+
+### Improved
+- **Fetch Missing Metadata** retries models Civitai did not know last time, using
+  the hash recorded in their stub sidecar instead of re-hashing the file, and
+  reports them as `not found` rather than `skipped`. Force rehash still re-reads
+  the file.
+- The User-Agent sent to Civitai carries the release version read from
+  `pyproject.toml` instead of a hard-coded `0.1`.
+- The stacked single-column card layout now keys off the panel's own width, the
+  way the other narrow-panel rules do, rather than a window-width rule that never
+  applied to a sidebar.
+- Removed the leftover domain and NSFW parameters from the client and cache URL
+  helpers; links have been fixed to `civitai.red` since 1.3.0.
+- Wiki pages, the publishing checklist, and the issue template were brought in
+  line with the code: every route and config field is documented, the
+  non-existent `legacy_a1111/` directory is gone, and the publisher id is
+  described as the slug it is.
+- Added a GitHub Actions workflow that runs the test suite on Python 3.9 and 3.12
+  for every push and pull request.
+
 ## [1.7.0] - 2026-09-09
 
 ### Added

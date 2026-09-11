@@ -6,50 +6,56 @@ All routes are registered on Comfy's `PromptServer` and return JSON.
 
 Returns:
 
-- public config (API key redacted)
-- supported model types
-- effective resolved roots (Comfy defaults + `extra_model_paths.yaml` + configured custom paths)
+- `config`: public config (`apiKey` is always empty; `hasApiKey` says whether one is stored)
+- `supportedModelTypes`
+- `effectiveRoots`: resolved roots per model type (Comfy defaults + `extra_model_paths.yaml` + configured custom paths)
 
 ## `POST /civitai-updater/config`
 
-Request body fields:
+Every field is optional; only the fields present in the request are updated.
 
-- `apiKey`: string (optional)
-- `requestTimeoutSeconds`: integer (optional)
-- `maxRetries`: integer (optional)
-- `requestDelayMs`: integer (optional)
-- `treatSidecarsAsInstalled`: boolean (optional, defaults to `true`)
-- `matureMode`: `show` | `blur` | `hide` (optional, defaults to `show`)
-- `customPaths`: object keyed by model type (`checkpoint|lora|vae|unet|embedding`); only the keys present in the request are updated
+- `apiKey`: string
+- `cacheTtlMinutes`: integer, 0–10080 (used by the panel to decide when a re-check is suggested)
+- `requestTimeoutSeconds`: integer, 5–300
+- `maxRetries`: integer, 0–10
+- `requestDelayMs`: integer, 0–3000
+- `useComfyPaths`, `useExtraModelPaths`, `useCustomPaths`: boolean path-source toggles
+- `treatSidecarsAsInstalled`: boolean (defaults to `true`)
+- `matureMode`: `show` | `blur` | `hide` (defaults to `show`)
+- `customPaths`: object keyed by model type (`checkpoint|lora|vae|unet|embedding`); a value is a list of paths or a string separated by `;` or new lines. Only the keys present in the request are updated.
 
-Response:
-
-- updated public config
-- effective resolved roots
+Response: `config` (public) and `effectiveRoots`, as for `GET`.
 
 ## `POST /civitai-updater/jobs/scan`
 
-Starts metadata scan job.
+Starts a metadata scan job (the **Fetch Missing Metadata** button).
 
 Request body:
 
-- `modelTypes`: string array
+- `modelTypes`: string array (defaults to all)
+- `includeCustomPaths`: boolean (defaults to `true`)
 - `refetchMetadata`: boolean
 - `forceRehash`: boolean
 
-Response:
-
-- `jobId`
+Response: `jobId`. Returns HTTP 409 with `error` when another job is running.
 
 ## `POST /civitai-updater/jobs/check-updates`
 
-Starts update-check job.
+Starts an update-check job.
 
-Request body: same as scan job.
+Request body: same as the scan job.
 
-Response:
+Response: `jobId`, or HTTP 409 as above.
 
-- `jobId`
+The job is seeded with every item of the previous check so the panel keeps
+showing them (marked provisional) while models are re-checked. When the job
+finishes, the items of the checked model types are replaced and the items of
+any other type are carried over, then the whole set is saved as the new cache.
+
+## `GET /civitai-updater/jobs/active`
+
+Returns `job` (the job record without items) for the running, queued, or
+paused job, or `null`.
 
 ## `GET /civitai-updater/jobs/{job_id}`
 
@@ -69,7 +75,9 @@ Query:
 Summary shape depends on mode:
 
 - scan: `total`, `refreshed`, `skipped`, `notFound`, `errors`
-- check: `total`, `resolved`, `withUpdates`, `notFound`, `errors`
+- check: `total`, `resolved`, `withUpdates`, `hiddenUpdates`, `notFound`, `errors`
+
+Both carry `sidecarWarnings`, `modelTypes`, and `includeCustomPaths`.
 
 ## `GET /civitai-updater/jobs/{job_id}/items`
 
@@ -84,15 +92,13 @@ Query parameters:
 - `collapsed`: repeatable group key, either `Checkpoint` or `Checkpoint||SDXL`
 - `mature`: `show` | `blur` | `hide`; omitted falls back to the stored setting
 
-Response adds `groups` (the outline with counts for the whole result set),
-`grouping`, `startsMidPrimary` / `startsMidSecondary` (whether the page opens
-inside a group that began earlier), `matureHidden` and `matureMode`. Each item
-carries `groupPrimary` and `groupSecondary`.
+Response fields: `jobId`, `totalItems`, `offset`, `limit`, `mode`, `facets`,
+`groups` (the outline with counts for the whole result set), `grouping`,
+`startsMidPrimary` / `startsMidSecondary` (whether the page opens inside a
+group that began earlier), `matureHidden`, `matureMode`, `items`.
 
-Base response fields: `jobId`, `totalItems`, `offset`, `limit`, `mode`,
-`facets`, `items`.
-
-Grouped items now include:
+Each item is one model and carries `groupPrimary`, `groupSecondary`,
+`groupPrimaryKey`, `groupPathKey`, and:
 
 - `localVersions`
 - `newVersions`
@@ -101,6 +107,19 @@ Grouped items now include:
 
 Each local version includes `metadataOnly`, which is `true` when the installed
 version is represented only by a valid `.civitai.info` sidecar.
+
+## `GET /civitai-updater/last-check`
+
+Returns `sidecarWarnings` and `data`:
+
+- `null` when no check has been saved; `cacheInvalid: true` is added when the
+  saved file is from an older schema
+- while a check is running: `jobId`, `checkedAt`, `summary`, `itemCount`, `inProgress: true`
+- otherwise the saved check: `jobId` (always `cached`), `checkedAt`, `summary`,
+  `itemCount`, `inProgress: false`, `filesChanged`, `filesAdded`, `filesRemoved`
+
+The saved check is loaded as a job with id `cached`, so its items can be paged
+through `GET /civitai-updater/jobs/cached/items`.
 
 ## `POST /civitai-updater/archived-updates`
 
@@ -111,9 +130,11 @@ Request body:
 - `modelId`: string
 - `versionIds`: string array
 
+Response: `modelId`, `archivedVersionIds`.
+
 ## `POST /civitai-updater/archived-updates/restore`
 
-Removes previously hidden remote version IDs for a model.
+Removes previously hidden remote version IDs for a model. Same body and response.
 
 ## `POST /civitai-updater/jobs/{job_id}/pause`
 

@@ -7,7 +7,7 @@ import time
 import uuid
 
 from .base_models import UNKNOWN_FAMILY, base_family, family_sort_key
-from .constants import SUPPORTED_MODEL_TYPES
+from .constants import MODEL_PAGE_BASE_URL, SUPPORTED_MODEL_TYPES
 
 _MAX_FINISHED_JOBS = 5
 
@@ -473,7 +473,7 @@ def _parse_iso(value: str):
         return None
 
 
-def _normalize_cached_item_urls(item: dict, civitai_domain: str = "civitai.red") -> dict:
+def _normalize_cached_item_urls(item: dict) -> dict:
     if not isinstance(item, dict):
         return item
 
@@ -493,11 +493,10 @@ def _normalize_cached_item_urls(item: dict, civitai_domain: str = "civitai.red")
     return normalized
 
 
-def _normalize_civitai_model_page_url(url: str, civitai_domain: str = "civitai.red", nsfw: bool = False) -> str:
+def _normalize_civitai_model_page_url(url: str) -> str:
+    """Rewrite model page links saved before the civitai.red switch."""
     if not isinstance(url, str) or not url:
         return ""
-
-    target_domain = "civitai.red"
 
     legacy_bases = (
         "https://civitai.com/models",
@@ -507,7 +506,7 @@ def _normalize_civitai_model_page_url(url: str, civitai_domain: str = "civitai.r
     )
     for legacy_base in legacy_bases:
         if url.startswith(legacy_base):
-            return f"https://{target_domain}/models{url[len(legacy_base):]}"
+            return f"{MODEL_PAGE_BASE_URL}{url[len(legacy_base):]}"
     return url
 
 
@@ -594,6 +593,16 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
                     "availability": remote_version.get("availability", ""),
                 }
 
+    # A local version without a date cannot be compared, and an empty newest
+    # date would make every other release look new. Civitai reports the date
+    # of that same version in the remote list, so take it from there.
+    for local_version in local_versions:
+        if local_version.get("publishedAt"):
+            continue
+        remote_match = remote_versions_by_id.get(local_version.get("versionId", ""))
+        if remote_match and remote_match.get("versionDate"):
+            local_version["publishedAt"] = remote_match["versionDate"]
+
     local_versions.sort(
         key=lambda version: (version.get("publishedAt", ""), (version.get("versionName") or "").lower()),
         reverse=True,
@@ -601,14 +610,17 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
     newest_local_date = max((version.get("publishedAt", "") for version in local_versions if version.get("publishedAt")), default="")
 
     candidates = []
-    for remote_version in remote_versions_by_id.values():
-        version_id = remote_version.get("versionId", "")
-        version_date = remote_version.get("versionDate", "")
-        if not version_date or version_id in local_version_ids:
-            continue
-        if newest_local_date and version_date <= newest_local_date:
-            continue
-        candidates.append(remote_version)
+    # With no usable local date there is nothing to compare against, so no
+    # release is claimed as new rather than all of them.
+    if newest_local_date:
+        for remote_version in remote_versions_by_id.values():
+            version_id = remote_version.get("versionId", "")
+            version_date = remote_version.get("versionDate", "")
+            if not version_date or version_id in local_version_ids:
+                continue
+            if version_date <= newest_local_date:
+                continue
+            candidates.append(remote_version)
 
     candidates.sort(key=lambda version: (version.get("versionDate", ""), version.get("versionName", "").lower()), reverse=True)
 

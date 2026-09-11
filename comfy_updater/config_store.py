@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from .constants import SUPPORTED_MODEL_TYPES
+from .sidecar import quarantine_corrupt_file
 
 
 DEFAULT_CONFIG = {
@@ -37,7 +38,18 @@ class ConfigStore:
 
         try:
             loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except OSError as exc:
+            # Unreadable, not corrupt: keep defaults in memory but leave the
+            # file alone so a transient error never overwrites the API key
+            # and custom paths.
+            print(f"Civitai updater: could not read {self.config_path} ({exc}); using defaults for this session.")
+            return
+        except json.JSONDecodeError as exc:
+            backup = quarantine_corrupt_file(self.config_path)
+            print(
+                f"Civitai updater: {self.config_path} is not valid JSON ({exc}). "
+                f"It was moved to {backup} and default settings were written."
+            )
             loaded = {}
 
         self._config = self._merged(loaded)

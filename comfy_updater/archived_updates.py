@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 
 from .constants import ARCHIVED_UPDATES_FILENAME
+from .sidecar import quarantine_corrupt_file
 
 
 class ArchivedUpdateStore:
@@ -20,7 +21,19 @@ class ArchivedUpdateStore:
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except OSError as exc:
+            # Leave the file untouched: saving now would replace every hidden
+            # version with an empty list.
+            print(f"Civitai updater: could not read {self.path} ({exc}); hidden versions are unavailable this session.")
+            return
+        except json.JSONDecodeError as exc:
+            backup = quarantine_corrupt_file(self.path)
+            print(
+                f"Civitai updater: {self.path} is not valid JSON ({exc}). "
+                f"It was moved to {backup} and an empty list was written."
+            )
+            payload = {}
+        if not isinstance(payload, dict):
             payload = {}
         entries = payload.get("archivedUpdates", {})
         if not isinstance(entries, dict):

@@ -18,9 +18,10 @@ Go to `Settings -> Civitai Updater`:
 
 1. Click `Check for Updates`.
 2. Watch progress bar and status.
-3. Review `Updates Results` cards (update-only).
+3. Review the `Results` cards (only models with a newer release are listed).
 4. Use the multi-select `Types` and `Bases` filters, plus `Show hidden`, to narrow the result list.
 5. Use `Pause/Resume` or `Stop` for long jobs.
+6. Limit the **Model Scope** in the panel settings to re-check only some types; results for the other types are kept from the previous check.
 
 ## 4. Metadata workflow (Advanced)
 

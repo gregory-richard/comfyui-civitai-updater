@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 from .constants import INFO_SIDECAR_SUFFIX, PREVIEW_SIDECAR_SUFFIX
@@ -66,6 +67,18 @@ def _looks_like_safetensors(prefix: bytes, file_size: int) -> bool:
         return False
     header_size = int.from_bytes(prefix[:8], byteorder="little", signed=False)
     return 2 <= header_size <= file_size - 8
+
+
+def quarantine_corrupt_file(path: Path) -> Path:
+    """Move a file that failed to parse aside so its contents can be recovered by hand."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(f"{path.name}.corrupt-{stamp}")
+    counter = 1
+    while backup.exists():
+        backup = path.with_name(f"{path.name}.corrupt-{stamp}-{counter}")
+        counter += 1
+    path.replace(backup)
+    return backup
 
 
 def write_json(path: Path, payload: dict) -> None:

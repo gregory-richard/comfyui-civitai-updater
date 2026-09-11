@@ -7,6 +7,7 @@ from pathlib import Path
 from comfy_updater.config_store import ConfigStore
 from comfy_updater.constants import CACHE_SCHEMA_VERSION
 from comfy_updater.routes import (
+    _merge_check_items,
     _normalize_archive_payload,
     _normalize_config_payload,
     _seed_items_from_cache,
@@ -50,7 +51,7 @@ class RouteAndVersionHelperTests(unittest.TestCase):
             self.assertEqual(["C:\\embeddings"], updated["customPaths"]["embedding"])
             self.assertEqual(["C:\\checkpoints"], updated["customPaths"]["checkpoint"])
 
-    def test_seed_items_from_cache_filters_types_and_marks_items(self) -> None:
+    def test_seed_items_from_cache_keeps_every_type_and_marks_items(self) -> None:
         cache = {
             "schemaVersion": CACHE_SCHEMA_VERSION,
             "items": [
@@ -64,22 +65,53 @@ class RouteAndVersionHelperTests(unittest.TestCase):
             ],
         }
 
-        seeded = _seed_items_from_cache(cache, ["lora"])
+        seeded = _seed_items_from_cache(cache)
 
-        self.assertEqual(1, len(seeded))
-        self.assertTrue(seeded[0]["_seeded"])
+        # A check limited to one type must still show the others while it runs.
+        self.assertEqual(2, len(seeded))
+        self.assertTrue(all(item["_seeded"] for item in seeded))
         self.assertEqual("C:\\models\\a.safetensors", seeded[0]["modelPath"])
         self.assertEqual("https://civitai.red/models/1", seeded[0]["modelUrl"])
 
     def test_seed_items_from_cache_rejects_missing_or_outdated_cache(self) -> None:
-        self.assertEqual([], _seed_items_from_cache(None, ["lora"]))
+        self.assertEqual([], _seed_items_from_cache(None))
         self.assertEqual(
             [],
             _seed_items_from_cache(
                 {"schemaVersion": CACHE_SCHEMA_VERSION - 1, "items": [{"modelType": "lora"}]},
-                ["lora"],
             ),
         )
+
+    def test_merge_check_items_replaces_checked_types_and_keeps_the_rest(self) -> None:
+        cache = {
+            "schemaVersion": CACHE_SCHEMA_VERSION,
+            "items": [
+                {"modelPath": "C:\\models\\old-lora.safetensors", "modelType": "lora", "remoteVersions": []},
+                {
+                    "modelPath": "C:\\models\\ckpt.safetensors",
+                    "modelType": "checkpoint",
+                    "modelUrl": "https://civitai.com/models/7",
+                    "remoteVersions": [],
+                },
+            ],
+        }
+        fresh = [{"modelPath": "C:\\models\\new-lora.safetensors", "modelType": "lora", "remoteVersions": []}]
+
+        merged = _merge_check_items(cache, fresh, ["lora"])
+
+        paths = [item["modelPath"] for item in merged]
+        # The deleted lora is gone, the new one is in, the checkpoint survives.
+        self.assertNotIn("C:\\models\\old-lora.safetensors", paths)
+        self.assertIn("C:\\models\\new-lora.safetensors", paths)
+        self.assertIn("C:\\models\\ckpt.safetensors", paths)
+        checkpoint = next(item for item in merged if item["modelType"] == "checkpoint")
+        self.assertEqual("https://civitai.red/models/7", checkpoint["modelUrl"])
+
+    def test_merge_check_items_without_types_or_cache_returns_fresh(self) -> None:
+        fresh = [{"modelPath": "a", "modelType": "lora"}]
+        self.assertEqual(fresh, _merge_check_items(None, fresh, ["lora"]))
+        self.assertEqual(fresh, _merge_check_items({"schemaVersion": 1, "items": [{"modelType": "vae"}]}, fresh, ["lora"]))
+        self.assertEqual(fresh, _merge_check_items({"schemaVersion": CACHE_SCHEMA_VERSION, "items": [{"modelType": "vae"}]}, fresh, None))
 
     def test_version_date_prefers_published_and_falls_back_to_created(self) -> None:
         self.assertEqual(

@@ -7,7 +7,13 @@ import subprocess
 import time
 import requests
 
-from .constants import MODEL_BY_ID_URL, MODEL_VERSION_BY_ID_URL, VERSION_BY_HASH_URL
+from .constants import (
+    MODEL_BY_ID_URL,
+    MODEL_PAGE_BASE_URL,
+    MODEL_VERSION_BY_ID_URL,
+    USER_AGENT,
+    VERSION_BY_HASH_URL,
+)
 
 try:
     from PIL import Image
@@ -16,14 +22,15 @@ except Exception:  # pragma: no cover - optional import guard
 
 
 class CivitaiClient:
-    def __init__(self, api_key: str, timeout_seconds: int, max_retries: int, civitai_domain: str = "civitai.red"):
+    def __init__(self, api_key: str, timeout_seconds: int, max_retries: int):
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
-        self.civitai_domain = "civitai.red"
         self.session = requests.Session()
-        self._model_cache: dict[str, dict | None] = {}
+        # Caches the model payload, None for a silent miss, or the error that
+        # a strict lookup raised, so several files of one model share a call.
+        self._model_cache: dict[str, dict | None | CivitaiRequestError] = {}
         self.default_headers = {
-            "User-Agent": "comfyui-civitai-updater/0.1",
+            "User-Agent": USER_AGENT,
         }
         api_key = (api_key or "").strip()
         if api_key:
@@ -33,10 +40,26 @@ class CivitaiClient:
         return self._get_json(f"{VERSION_BY_HASH_URL}/{sha256_hash}")
 
     def get_model(self, model_id: int | str, *, raise_on_error: bool = False) -> dict | None:
+        """Fetch a model page payload.
+
+        With ``raise_on_error`` a request that fails after retries, or that
+        Civitai refuses (401/403) or cannot find (404), raises
+        ``CivitaiRequestError`` instead of returning None, so callers can tell
+        a missing model from an empty one.
+        """
         key = str(model_id)
         if key not in self._model_cache:
-            self._model_cache[key] = self._get_json(f"{MODEL_BY_ID_URL}/{model_id}", raise_on_error=raise_on_error)
-        return self._model_cache[key]
+            try:
+                self._model_cache[key] = self._get_json(f"{MODEL_BY_ID_URL}/{model_id}", raise_on_error=raise_on_error)
+            except CivitaiRequestError as exc:
+                self._model_cache[key] = exc
+                raise
+        cached = self._model_cache[key]
+        if isinstance(cached, CivitaiRequestError):
+            if raise_on_error:
+                raise cached
+            return None
+        return cached
 
     def get_version(self, version_id: int | str) -> dict | None:
         return self._get_json(f"{MODEL_VERSION_BY_ID_URL}/{version_id}")
@@ -53,13 +76,13 @@ class CivitaiClient:
         is_nsfw = bool(model.get("nsfw"))
         return (creator_name, versions, is_nsfw)
 
-    def model_page_url(self, model_id: int | str, nsfw: bool = False) -> str:
-        return f"https://civitai.red/models/{model_id}"
+    def model_page_url(self, model_id: int | str) -> str:
+        return f"{MODEL_PAGE_BASE_URL}/{model_id}"
 
-    def version_page_url(self, model_id: int | str, version_id: int | str | None = None, nsfw: bool = False) -> str:
+    def version_page_url(self, model_id: int | str, version_id: int | str | None = None) -> str:
         if version_id:
-            return f"https://civitai.red/models/{model_id}?modelVersionId={version_id}"
-        return self.model_page_url(model_id, nsfw=nsfw)
+            return f"{MODEL_PAGE_BASE_URL}/{model_id}?modelVersionId={version_id}"
+        return self.model_page_url(model_id)
 
     def download_file(
         self,
@@ -191,11 +214,18 @@ class CivitaiClient:
                         return None
                 if response.status_code in (401, 403):
                     if "Authorization" in self.default_headers:
-                        print(f"Civitai API Key validation failed: {response.status_code} {response.reason}. Please verify your API Key in the settings panel.")
+                        detail = "Civitai rejected the API key. Verify it in the settings panel."
                     else:
-                        print(f"Civitai denied the request: {response.status_code} {response.reason}. This resource may require an API Key — set one in the settings panel.")
+                        detail = "Civitai denied the request. This resource may require an API key — set one in the settings panel."
+                    print(f"Civitai updater: {response.status_code} {response.reason} for {url}. {detail}")
+                    if raise_on_error:
+                        raise CivitaiRequestError(f"{response.status_code} {response.reason}. {detail}")
                     return None
                 if response.status_code in (400, 404):
+                    if raise_on_error:
+                        raise CivitaiRequestError(
+                            f"{response.status_code} {response.reason}. The model may have been removed from Civitai."
+                        )
                     return None
                 last_error = f"{response.status_code} {response.reason}"
 

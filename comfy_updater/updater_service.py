@@ -206,7 +206,13 @@ class UpdaterService:
         preview_path = preview_path or preview_sidecar_path(model_path)
 
         existing_info = read_json(info_path)
-        if mode == "scan" and existing_info and not refetch_metadata:
+        # A sidecar identifies a model only when it carries both ids. The stub
+        # written for a not_found file records the hash but no identity, so it
+        # must not count as "metadata already fetched".
+        has_identity = _sidecar_identifies_model(existing_info)
+        stored_hash = _stored_sha256(existing_info)
+
+        if mode == "scan" and has_identity and not refetch_metadata:
             _download_preview_if_needed(client, preview_path, existing_info, force=False)
             _skip_url, _skip_type = _first_preview(existing_info)
             is_nsfw = False
@@ -246,21 +252,17 @@ class UpdaterService:
         version_data = None
         model_id = None
 
-        can_use_sidecar = (
-            mode == "check"
-            and (metadata_only or not force_rehash)
-            and existing_info
-            and existing_info.get("modelId")
-            and existing_info.get("id")
-        )
+        can_use_sidecar = mode == "check" and has_identity and (metadata_only or not force_rehash)
         can_refetch_by_sidecar_id = (
-            mode == "scan"
-            and refetch_metadata
-            and (metadata_only or not force_rehash)
-            and existing_info
-            and existing_info.get("modelId")
-            and existing_info.get("id")
+            mode == "scan" and refetch_metadata and has_identity and (metadata_only or not force_rehash)
         )
+
+        def identify_by_hash() -> tuple[str, dict | None]:
+            # A stub sidecar already holds the file's hash: reuse it so a model
+            # Civitai did not know last time is retried with one API call
+            # instead of re-hashing gigabytes. Force rehash bypasses this.
+            file_hash = stored_hash if (stored_hash and not force_rehash) else sha256_file(model_path)
+            return file_hash, client.get_version_by_hash(file_hash)
 
         if can_use_sidecar:
             model_id = existing_info.get("modelId")
@@ -284,14 +286,12 @@ class UpdaterService:
             else:
                 # Fallback when the sidecar version id is stale or unavailable.
                 if not metadata_only:
-                    local_hash = sha256_file(model_path)
-                    version_data = client.get_version_by_hash(local_hash)
+                    local_hash, version_data = identify_by_hash()
                     if version_data:
                         model_id = version_data.get("modelId")
         else:
             if not metadata_only:
-                local_hash = sha256_file(model_path)
-                version_data = client.get_version_by_hash(local_hash)
+                local_hash, version_data = identify_by_hash()
                 if version_data:
                     model_id = version_data.get("modelId")
 
@@ -315,7 +315,7 @@ class UpdaterService:
                 "downloadUrl": "",
                 "nsfw": False,
             }
-            if mode == "scan" and not metadata_only and (refetch_metadata or not existing_info):
+            if mode == "scan" and not metadata_only and (refetch_metadata or not has_identity):
                 write_json(
                     info_path,
                     {
@@ -335,8 +335,8 @@ class UpdaterService:
                 if isinstance(model_info, dict):
                     is_nsfw = bool(model_info.get("nsfw"))
 
-            model_url = client.model_page_url(model_id, nsfw=is_nsfw)
-            version_url = client.version_page_url(model_id, version_data.get("id"), nsfw=is_nsfw)
+            model_url = client.model_page_url(model_id)
+            version_url = client.version_page_url(model_id, version_data.get("id"))
             preview_url, preview_type = _first_preview(version_data)
 
             sidecar_payload = dict(version_data)
@@ -410,9 +410,20 @@ class UpdaterService:
                 "nsfw": False,
                 "lastCheckedAt": _utc_now(),
             }
-        remote_versions = _normalize_remote_versions(client, model_id, model_versions, nsfw=is_nsfw)
+        remote_versions = _normalize_remote_versions(client, model_id, model_versions)
         local_id = str(version_data.get("id") or "")
         local_date = _version_date(version_data)
+        local_remote = next(
+            (entry for entry in remote_versions if entry.get("versionId") == local_id),
+            None,
+        )
+        # Sidecars written by other tools may carry no release date. Without
+        # one, nothing can be judged newer, so take the date Civitai reports
+        # for the very same version.
+        if not local_date and local_remote and local_remote.get("versionDate"):
+            local_date = local_remote["versionDate"]
+            version_data = dict(version_data)
+            version_data["publishedAt"] = local_date
         new_versions = [
             remote_version
             for remote_version in remote_versions
@@ -428,10 +439,6 @@ class UpdaterService:
         # image lists. Backfill the local preview from the freshly fetched
         # remote data for the same version so those models heal on re-check.
         if not local_preview_url and local_id:
-            local_remote = next(
-                (entry for entry in remote_versions if entry.get("versionId") == local_id),
-                None,
-            )
             if local_remote and local_remote.get("previewUrl"):
                 local_preview_url = local_remote["previewUrl"]
                 local_preview_type = local_remote.get("previewType") or "image"
@@ -446,8 +453,8 @@ class UpdaterService:
             preview_url = local_preview_url
             preview_type = local_preview_type
 
-        model_url = client.model_page_url(model_id, nsfw=is_nsfw)
-        version_url = primary_new_version.get("versionUrl", "") or client.version_page_url(model_id, local_id, nsfw=is_nsfw)
+        model_url = client.model_page_url(model_id)
+        version_url = primary_new_version.get("versionUrl", "") or client.version_page_url(model_id, local_id)
 
         if local_hash and version_data:
             sidecar_payload = dict(version_data)
@@ -548,7 +555,6 @@ def _normalize_remote_versions(
     client: CivitaiClient,
     model_id: int | str,
     model_versions: list[dict] | None,
-    nsfw: bool = False,
 ) -> list[dict]:
     normalized = []
     for version_data in model_versions or []:
@@ -565,7 +571,7 @@ def _normalize_remote_versions(
                 "baseModel": version_data.get("baseModel", ""),
                 "previewUrl": preview_url,
                 "previewType": preview_type,
-                "versionUrl": client.version_page_url(model_id, version_id, nsfw=nsfw),
+                "versionUrl": client.version_page_url(model_id, version_id),
                 "downloadUrl": _first_download_url(version_data) or "",
                 "availability": _version_availability(version_data),
             }
@@ -580,6 +586,26 @@ def _normalize_remote_versions(
 def _version_availability(version_data: dict) -> str:
     availability = version_data.get("availability")
     return availability if isinstance(availability, str) else ""
+
+
+def _sidecar_identifies_model(info: dict | None) -> bool:
+    if not isinstance(info, dict):
+        return False
+    return bool(info.get("modelId")) and bool(info.get("id"))
+
+
+def _stored_sha256(info: dict | None) -> str:
+    """Return the SHA256 recorded in a sidecar's first file entry, if any."""
+    if not isinstance(info, dict):
+        return ""
+    files = info.get("files")
+    if not isinstance(files, list) or not files or not isinstance(files[0], dict):
+        return ""
+    hashes = files[0].get("hashes")
+    if not isinstance(hashes, dict):
+        return ""
+    value = hashes.get("SHA256") or hashes.get("sha256") or ""
+    return value.strip().lower() if isinstance(value, str) else ""
 
 
 def _set_sha256_hash(version_data: dict, sha256_hash: str) -> None:

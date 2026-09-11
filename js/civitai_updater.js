@@ -117,6 +117,9 @@ const state = {
 
   settingsSyncTimer: null,
   suspendSettingsSync: false,
+  progressEtaEl: null,
+  lightboxKeyHandler: null,
+  recoveringJob: false,
 };
 
 app.registerExtension({
@@ -285,19 +288,7 @@ async function loadCachedResults() {
     // check) so a page reload keeps progress and the pause/stop controls.
     const activeResp = await getJson("/civitai-updater/jobs/active").catch(() => ({ job: null }));
     if (activeResp.job) {
-      state.currentJobId = activeResp.job.jobId;
-      state.currentJobType = activeResp.job.type;
-      state.currentJobStatus = activeResp.job.status;
-      state.currentProgress = activeResp.job.progress || 0;
-      state.currentTotal = activeResp.job.total || 0;
-      state.currentItemCount = activeResp.job.itemCount || 0;
-      if (activeResp.job.type === "check-updates") {
-        state.checkJobId = activeResp.job.jobId;
-      }
-      updateProgress(state.currentProgress, state.currentTotal, true);
-      updateControlButtons();
-      setStatus(`Reconnected \u2014 ${activeResp.job.message || "running"}`);
-      pollJob(activeResp.job.jobId);
+      attachToRunningJob(activeResp.job);
       return;
     }
 
@@ -312,7 +303,15 @@ async function loadCachedResults() {
     }
 
     if (resp.data.inProgress) {
-      setStatus("Previous check was interrupted. Run Check for Updates again.");
+      // The active-job request failed but a check is still running: attach
+      // to it through the id the last-check endpoint reports.
+      attachToRunningJob({
+        jobId: resp.data.jobId,
+        type: "check-updates",
+        status: "running",
+        itemCount: resp.data.itemCount || 0,
+        message: "running",
+      });
       return;
     }
 
@@ -331,6 +330,70 @@ async function loadCachedResults() {
     await loadResultPage(true);
   } catch (_) {
     // cache load is best-effort
+  }
+}
+
+function attachToRunningJob(job) {
+  state.currentJobId = job.jobId;
+  state.currentJobType = job.type;
+  state.currentJobStatus = job.status || "running";
+  state.currentProgress = job.progress || 0;
+  state.currentTotal = job.total || 0;
+  state.currentItemCount = job.itemCount || 0;
+  if (job.type === "check-updates") {
+    state.checkJobId = job.jobId;
+  }
+  updateProgress(state.currentProgress, state.currentTotal, true);
+  updateControlButtons();
+  setStatus(`Reconnected \u2014 ${job.message || "running"}`);
+  pollJob(job.jobId);
+}
+
+function clearCurrentJob() {
+  state.currentJobId = null;
+  state.currentJobType = null;
+  state.currentJobStatus = null;
+  state.currentSummary = null;
+  state.currentProgress = 0;
+  state.currentTotal = 0;
+  state.currentItemCount = 0;
+}
+
+function isLostJobError(error) {
+  return /job not found/i.test(String(error?.message || ""));
+}
+
+/* The server no longer knows the job the panel is showing: ComfyUI was
+   restarted, or the record was pruned. Without this the panel keeps asking
+   for a dead id and every request fails until the page is reloaded. Drop
+   the stale ids and fall back to the on-disk cache, as a fresh load would. */
+async function recoverFromLostJob() {
+  if (state.recoveringJob) return;
+  state.recoveringJob = true;
+  try {
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+    clearCurrentJob();
+    resetEta();
+    state.checkJobId = null;
+    state.cachedJobId = null;
+    state.checkSummary = null;
+    state.cachedAt = null;
+    state.cacheFilesChanged = null;
+    state.resultItems = [];
+    state.resultTotal = 0;
+    state.resultOffset = 0;
+    state.pageOffset = 0;
+    updateProgress(0, 0, false);
+    updateControlButtons();
+    renderCacheInfo();
+    renderResults();
+    setStatus("The server was restarted \u2014 reloading the last saved results.");
+    await loadCachedResults();
+  } finally {
+    state.recoveringJob = false;
   }
 }
 
@@ -609,16 +672,15 @@ function pollJob(jobId) {
         }
         resetEta();
         updateProgress(progress, total, false);
-        state.currentJobId = null;
-        state.currentJobType = null;
-        state.currentJobStatus = null;
-        state.currentSummary = null;
-        state.currentProgress = 0;
-        state.currentTotal = 0;
-        state.currentItemCount = 0;
+        clearCurrentJob();
         updateControlButtons();
       }
     } catch (error) {
+      if (isLostJobError(error)) {
+        // A 404 for the job means the server came back without it.
+        await recoverFromLostJob();
+        return;
+      }
       consecutiveFailures++;
       if (consecutiveFailures < 5) {
         setStatus(`Reconnecting... (Attempt ${consecutiveFailures}/5)`);
@@ -626,17 +688,15 @@ function pollJob(jobId) {
       }
       clearInterval(state.pollTimer);
       state.pollTimer = null;
-      state.currentJobId = null;
-      state.currentJobType = null;
-      state.currentJobStatus = null;
-      state.currentSummary = null;
-      state.currentProgress = 0;
-      state.currentTotal = 0;
-      state.currentItemCount = 0;
+      clearCurrentJob();
+      // Forget the result ids too, so reopening the tab reloads from the
+      // cache instead of asking a restarted server for a job it never had.
+      state.checkJobId = null;
+      state.cachedJobId = null;
       resetEta();
       updateProgress(0, 0, false);
       updateControlButtons();
-      setStatus(`Poll error: ${error.message}`);
+      setStatus(`Lost contact with the server (${error.message}). Reopen the panel to reload results.`);
     }
   }, POLL_MS);
 }
@@ -690,6 +750,10 @@ async function loadResultPage(force) {
     }
     renderResults();
   } catch (error) {
+    if (isLostJobError(error)) {
+      await recoverFromLostJob();
+      return;
+    }
     setStatus(`Failed to fetch result page: ${error.message}`);
   }
 }
@@ -882,11 +946,8 @@ function buildResultCard(item, cardIndex) {
       const target = e.currentTarget;
       const path = target.dataset.path || "";
       const original = target.textContent;
-      navigator.clipboard.writeText(path).then(() => {
-        target.textContent = "Copied!";
-        setTimeout(() => { target.textContent = original; }, 1500);
-      }).catch(() => {
-        target.textContent = "Failed";
+      copyToClipboard(path).then((copied) => {
+        target.textContent = copied ? "Copied!" : "Copy failed";
         setTimeout(() => { target.textContent = original; }, 1500);
       });
     });
@@ -1510,6 +1571,34 @@ function escapeHtml(text) {
     .replaceAll("'", "&#039;");
 }
 
+/* navigator.clipboard exists only in secure contexts, and ComfyUI is often
+   served over plain HTTP on a LAN address, where it is undefined and the
+   call would throw. Fall back to the selection-based copy there. */
+async function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      // fall through to the legacy path
+    }
+  }
+  try {
+    const scratch = document.createElement("textarea");
+    scratch.value = text;
+    scratch.setAttribute("readonly", "");
+    scratch.style.position = "fixed";
+    scratch.style.opacity = "0";
+    document.body.appendChild(scratch);
+    scratch.select();
+    const copied = document.execCommand("copy");
+    scratch.remove();
+    return copied;
+  } catch (_) {
+    return false;
+  }
+}
+
 function isTabVisible() {
   return Boolean(state.rootEl && state.rootEl.offsetParent !== null);
 }
@@ -1560,13 +1649,20 @@ function openLightbox(item) {
   overlay.querySelector(".cu-lb-backdrop").addEventListener("click", closeLightbox);
   overlay.querySelector(".cu-lb-close").addEventListener("click", closeLightbox);
 
-  const onKey = (e) => { if (e.key === "Escape") { closeLightbox(); document.removeEventListener("keydown", onKey); } };
+  const onKey = (e) => { if (e.key === "Escape") closeLightbox(); };
   document.addEventListener("keydown", onKey);
+  state.lightboxKeyHandler = onKey;
 }
 
 function closeLightbox() {
   const el = document.getElementById("cu-lightbox");
   if (el) el.remove();
+  // Every way of closing must drop the key handler, or one accumulates per
+  // open and they all fire on the next Escape.
+  if (state.lightboxKeyHandler) {
+    document.removeEventListener("keydown", state.lightboxKeyHandler);
+    state.lightboxKeyHandler = null;
+  }
 }
 
 async function getJson(path) {
@@ -3113,9 +3209,11 @@ function injectStyles() {
       }
     }
 
-    /* ---- Narrow sidebar ---- */
+    /* ---- Very narrow sidebar ----
+       The panel's own width decides, not the window's: a viewport query
+       never fired for a sidebar. Below this the thumbnail stacks on top. */
 
-    @media (max-width: 600px) {
+    @container (max-width: 280px) {
       .cu-item {
         grid-template-columns: 1fr;
       }
@@ -3124,16 +3222,6 @@ function injectStyles() {
         width: 100%;
         height: 120px;
       }
-
-      .cu-ver-row {
-        grid-template-columns: 68px 1fr;
-      }
-
-      .cu-ver-date,
-      .cu-ver-base {
-        display: none;
-      }
-
     }
 
     /* ---- Lightbox (appended to body, outside .cu-root) ---- */

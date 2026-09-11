@@ -81,9 +81,11 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
         job_holder: dict = {}
 
         # Seed the job with the previous check's results so the panel keeps
-        # showing them (marked provisional) while models are re-checked.
+        # showing them (marked provisional) while models are re-checked. Every
+        # cached item is carried, not just the requested types: a check of one
+        # type must not make the other types vanish from the panel.
         cache_data = await asyncio.to_thread(read_json, cache_path)
-        seed_items = _seed_items_from_cache(cache_data, payload.get("modelTypes"))
+        seed_items = _seed_items_from_cache(cache_data)
 
         def runner(progress, item_cb, control):
             nonlocal item_count
@@ -94,12 +96,18 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
                 item_count += 1
                 job_ref = job_holder.get("job")
                 if job_ref is not None and item_count % 5 == 0:
-                    _write_progress(progress_path, accumulated_items=None, job_ref=job_ref)
+                    _write_progress(progress_path, job_ref)
 
             summary, items = updater_service.run_check_updates(
                 payload, progress, item_cb_with_progress, control,
             )
+            # A check of a subset of types replaces only that subset in the
+            # cache; the previous results for the other types are kept, so
+            # the panel and the file-change detection still cover the whole
+            # library.
+            items = _merge_check_items(cache_data, items, payload.get("modelTypes"))
             summary = job_manager.summarize_check_items(summary, items)
+            summary["total"] = len(items)
             if not control.is_cancelled():
                 write_json(cache_path, {
                     "schemaVersion": CACHE_SCHEMA_VERSION,
@@ -114,7 +122,7 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
         if not job_ref:
             return web.json_response({"error": "A job is already running."}, status=409)
         job_holder["job"] = job_ref
-        _write_progress(progress_path, accumulated_items=None, job_ref=job_ref)
+        _write_progress(progress_path, job_ref)
         return web.json_response({"jobId": job_ref.id})
 
     @routes.get("/civitai-updater/last-check")
@@ -349,31 +357,47 @@ def _normalize_paths_value(entries) -> list[str]:
     return []
 
 
-def _seed_items_from_cache(cache_data, model_types: list[str] | None) -> list[dict]:
-    """Build provisional seed items from a cached check for a new job.
-
-    Only items matching the requested model types are carried over, and each
-    is marked ``_seeded`` so the job can replace it once the file is
-    re-checked. An empty list is returned for missing or outdated caches.
-    """
+def _cached_check_items(cache_data) -> list[dict]:
+    """Return the items of a cached check, or nothing for a missing or outdated cache."""
     if not isinstance(cache_data, dict):
         return []
     if int(cache_data.get("schemaVersion") or 0) != CACHE_SCHEMA_VERSION:
         return []
-    allowed = set(model_types or [])
+    return [item for item in cache_data.get("items", []) or [] if isinstance(item, dict)]
+
+
+def _seed_items_from_cache(cache_data) -> list[dict]:
+    """Build provisional seed items from a cached check for a new job.
+
+    Each item is marked ``_seeded`` so the job can replace it once the file is
+    re-checked. An empty list is returned for missing or outdated caches.
+    """
     seeded: list[dict] = []
-    for item in cache_data.get("items", []) or []:
-        if not isinstance(item, dict):
-            continue
-        if allowed and item.get("modelType") not in allowed:
-            continue
+    for item in _cached_check_items(cache_data):
         entry = dict(_normalize_cached_item_urls(item))
         entry["_seeded"] = True
         seeded.append(entry)
     return seeded
 
 
-def _write_progress(progress_path, *, accumulated_items, job_ref) -> None:
+def _merge_check_items(cache_data, fresh_items: list[dict], model_types: list[str] | None) -> list[dict]:
+    """Combine a check of ``model_types`` with the cached results of the rest.
+
+    Items of a checked type come only from the fresh run, so files that were
+    deleted drop out; items of any other type are carried over unchanged.
+    """
+    checked_types = set(model_types or [])
+    if not checked_types:
+        return list(fresh_items)
+    carried = [
+        _normalize_cached_item_urls(item)
+        for item in _cached_check_items(cache_data)
+        if item.get("modelType") not in checked_types
+    ]
+    return carried + list(fresh_items)
+
+
+def _write_progress(progress_path, job_ref) -> None:
     try:
         write_json(progress_path, {
             "jobId": job_ref.id,

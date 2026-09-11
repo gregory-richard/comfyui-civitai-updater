@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
+
+def _read_plugin_version() -> str:
+    """Read the version from pyproject.toml so the User-Agent tracks releases."""
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    try:
+        match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), re.MULTILINE)
+    except OSError:
+        return "unknown"
+    return match.group(1) if match else "unknown"
+
+
+PLUGIN_VERSION = _read_plugin_version()
+USER_AGENT = f"comfyui-civitai-updater/{PLUGIN_VERSION}"
+
 # The API must live on civitai.red: since the April 2026 domain split,
 # civitai.com ("green" domain) serves SFW-filtered API responses, so hash
 # lookups for mature models 404 there. civitai.red serves the full catalog.
