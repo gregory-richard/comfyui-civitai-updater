@@ -48,8 +48,10 @@ class RouteAndVersionHelperTests(unittest.TestCase):
             })
             updated = store.update(incoming)
 
-            self.assertEqual(["C:\\embeddings"], updated["customPaths"]["embedding"])
-            self.assertEqual(["C:\\checkpoints"], updated["customPaths"]["checkpoint"])
+            # ConfigStore normalizes through pathlib, so the separator follows
+            # the host OS: compare against the same normalization.
+            self.assertEqual([str(Path("C:/embeddings"))], updated["customPaths"]["embedding"])
+            self.assertEqual([str(Path("C:/checkpoints"))], updated["customPaths"]["checkpoint"])
 
     def test_seed_items_from_cache_keeps_every_type_and_marks_items(self) -> None:
         cache = {
