@@ -29,7 +29,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          # aiohttp is provided by ComfyUI at runtime; the routes module
+          # imports it, so the bare test environment needs it installed.
+          pip install -r requirements.txt aiohttp pytest
 
       - name: Run tests
         run: python -m pytest -q
