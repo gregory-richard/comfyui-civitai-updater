@@ -12,6 +12,7 @@ from .hashing import sha256_file
 
 ProgressCallback = Callable[[int, int, str], None]
 ItemCallback = Callable[[dict], None]
+FilesCallback = Callable[[list[dict]], None]
 
 
 class UpdaterService:
@@ -33,8 +34,12 @@ class UpdaterService:
         progress: ProgressCallback,
         item_callback: ItemCallback | None = None,
         control=None,
+        files_callback: FilesCallback | None = None,
     ) -> tuple[dict, list[dict]]:
-        return self._run(payload, progress, mode="check", item_callback=item_callback, control=control)
+        return self._run(
+            payload, progress, mode="check", item_callback=item_callback, control=control,
+            files_callback=files_callback,
+        )
 
     def get_effective_roots(
         self, model_types: list[str] | None = None, include_custom_paths: bool = True
@@ -69,6 +74,7 @@ class UpdaterService:
         mode: str,
         item_callback: ItemCallback | None = None,
         control=None,
+        files_callback: FilesCallback | None = None,
     ) -> tuple[dict, list[dict]]:
         config = self.config_store.get()
         model_types = normalize_model_types(payload.get("modelTypes"))
@@ -87,6 +93,8 @@ class UpdaterService:
             )
         )
         total = len(files)
+        if files_callback:
+            files_callback(files)
 
         progress(0, total, f"Discovered {total} model files")
 
@@ -506,6 +514,41 @@ def _dedupe_model_files(files: list[dict]) -> list[dict]:
         seen.add(path)
         deduped.append(entry)
     return deduped
+
+
+def sidecar_seed_item(model_entry: dict) -> dict | None:
+    """Build a placeholder check result from a file's .civitai.info alone.
+
+    It carries only the installed version (no remote versions), which is
+    enough for grouping to stop offering that release as new while the file
+    waits to be re-checked. Returns None when the sidecar cannot identify the
+    version.
+    """
+    info = read_json(model_entry["infoPath"])
+    if not isinstance(info, dict) or not info.get("modelId") or not info.get("id"):
+        return None
+    model_info = info.get("model")
+    model_nsfw = isinstance(model_info, dict) and bool(model_info.get("nsfw"))
+    preview_url, preview_type = _first_preview(info)
+    return {
+        "modelPath": str(model_entry["path"]),
+        "modelType": model_entry.get("modelType", ""),
+        "metadataOnly": bool(model_entry.get("metadataOnly")),
+        "modelId": str(info.get("modelId")),
+        "modelName": _model_name(info),
+        "baseModel": info.get("baseModel", ""),
+        "status": "ok",
+        "hasUpdate": False,
+        "localVersionId": str(info.get("id")),
+        "localVersionName": info.get("name", ""),
+        "localVersionDate": _version_date(info),
+        "previewUrl": preview_url,
+        "previewType": preview_type,
+        "localPreviewUrl": preview_url,
+        "localPreviewType": preview_type,
+        "remoteVersions": [],
+        "nsfw": bool(info.get("nsfw")) or model_nsfw,
+    }
 
 
 def _version_date(version_data: dict) -> str:

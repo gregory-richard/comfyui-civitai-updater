@@ -67,7 +67,7 @@ class JobManager:
         each seeded entry is replaced as a fresh item for its path arrives.
         """
         job_id = str(uuid.uuid4())
-        control = JobControl()
+        control = JobControl(job_id)
         record = JobRecord(id=job_id, type=job_type, control=control)
         if seed_items:
             record.items = list(seed_items)
@@ -95,6 +95,44 @@ class JobManager:
     def get(self, job_id: str) -> JobRecord | None:
         with self._lock:
             return self._jobs.get(job_id)
+
+    def sync_seeds_with_disk(
+        self,
+        job_id: str,
+        model_types: list[str],
+        current_paths: set[str],
+        added_seeds: list[dict],
+    ) -> None:
+        """Align a job's seeded items with the files that exist right now.
+
+        Seeds come from the previous check, so they miss files added since and
+        still list files removed since. A stale seed makes the provisional view
+        offer a release the user already downloaded, so seeds for vanished
+        files are dropped and ``added_seeds`` (already marked ``_seeded``) are
+        added for new ones. ``current_paths`` must be lower-cased and covers
+        only ``model_types``; seeds of other types are left alone.
+        """
+        checked_types = set(model_types)
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            kept: list[dict] = []
+            for item in job.items:
+                key = str(item.get("modelPath") or "").lower()
+                if item.get("_seeded") and item.get("modelType") in checked_types and key not in current_paths:
+                    job.seededPaths.discard(key)
+                    continue
+                kept.append(item)
+            job.items = kept
+            present = {str(item.get("modelPath") or "").lower() for item in job.items}
+            for seed in added_seeds:
+                key = str(seed.get("modelPath") or "").lower()
+                if not key or key in present:
+                    continue
+                job.items.append(seed)
+                job.seededPaths.add(key)
+                present.add(key)
 
     def get_items(
         self,
@@ -755,7 +793,9 @@ def _filename(path: str) -> str:
 
 
 class JobControl:
-    def __init__(self) -> None:
+    def __init__(self, job_id: str = "") -> None:
+        # Lets a runner address its own job before start() has returned.
+        self.job_id = job_id
         self._cancel_event = threading.Event()
         self._pause_event = threading.Event()
 

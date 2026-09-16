@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.8.1] - 2026-09-16
+
+### Fixed
+- A finished check could leave the panel listing the previous check's results.
+  The panel loads the saved results when it opens, and the server scans every
+  model folder before answering, which takes a few seconds. Clicking **Check for
+  Updates** before that answer arrived let it take over the list afterwards:
+  the progress bar and the `Done` message followed the new check while every
+  card came from the old one, until the page was reloaded. A check started in
+  the meantime now keeps the list, and a finished check always shows its own
+  results.
+- While a check runs, the previous results no longer offer a release you have
+  downloaded since. Once the check has listed your files, results for deleted
+  files are dropped and new files are filled in from their `.civitai.info`, so a
+  model counts the version you just saved before its files are re-checked.
+- Status polls no longer overlap when the server is slow to answer. Two
+  overlapping polls could both see the check finish, and the second one ended
+  it with `Scan complete` instead of the update count.
+
 ## [1.8.0] - 2026-09-11
 
 ### Fixed
