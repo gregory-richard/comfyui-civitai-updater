@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from comfy_updater.civitai_client import CivitaiRequestError
 from comfy_updater.config_store import ConfigStore
+from comfy_updater.jobs import JobControl
 from comfy_updater.sidecar import info_sidecar_path, read_json, write_json
 from comfy_updater.updater_service import UpdaterService
 
@@ -102,6 +103,34 @@ class PreviewBackfillClient(MetadataOnlyClient):
 
 
 class UpdaterServiceErrorTests(unittest.TestCase):
+    def test_check_reports_discovered_files_before_processing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            models = Path(tmpdir) / "models"
+            models.mkdir()
+            (models / "a.safetensors").write_bytes(b"weights")
+            store = ConfigStore(Path(tmpdir) / "data")
+            store.update({
+                "useComfyPaths": False,
+                "useExtraModelPaths": False,
+                "customPaths": {"lora": [str(models)]},
+            })
+            control = JobControl()
+            control.cancel()
+            reported = []
+
+            with patch("comfy_updater.updater_service.CivitaiClient"):
+                summary, items = UpdaterService(store).run_check_updates(
+                    {"modelTypes": ["lora"]},
+                    lambda current, total, message: None,
+                    control=control,
+                    files_callback=reported.append,
+                )
+
+            self.assertEqual(1, len(reported))
+            self.assertEqual([models.resolve() / "a.safetensors"], [entry["path"] for entry in reported[0]])
+            self.assertEqual(1, summary["total"])
+            self.assertEqual([], items)
+
     def test_model_lookup_failure_returns_error_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             model_path = Path(tmpdir) / "example.safetensors"

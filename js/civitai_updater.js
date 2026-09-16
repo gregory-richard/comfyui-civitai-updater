@@ -283,16 +283,22 @@ async function renderTab(el) {
 }
 
 async function loadCachedResults() {
+  // /last-check walks every model root and can take seconds. A job started
+  // meanwhile owns the results view; binding to the cached record after that
+  // would pin the list to the previous check's results for the whole run.
+  const superseded = () => Boolean(state.currentJobId || state.checkJobId);
   try {
     // Reconnect to any job that is still running server-side (scan or
     // check) so a page reload keeps progress and the pause/stop controls.
     const activeResp = await getJson("/civitai-updater/jobs/active").catch(() => ({ job: null }));
+    if (superseded()) return;
     if (activeResp.job) {
       attachToRunningJob(activeResp.job);
       return;
     }
 
     const resp = await getJson("/civitai-updater/last-check");
+    if (superseded()) return;
     state.sidecarWarnings = Array.isArray(resp.sidecarWarnings) ? resp.sidecarWarnings : [];
     renderSidecarWarnings();
     if (!resp.data) {
@@ -594,7 +600,12 @@ async function stopCurrentJob() {
 function pollJob(jobId) {
   if (state.pollTimer) clearInterval(state.pollTimer);
   let consecutiveFailures = 0;
+  // A slow tick must not overlap the next one: two ticks can both see the
+  // job finish and run the completion path twice.
+  let tickInFlight = false;
   state.pollTimer = setInterval(async () => {
+    if (tickInFlight) return;
+    tickInFlight = true;
     try {
       const job = await getJson(`/civitai-updater/jobs/${jobId}`);
       consecutiveFailures = 0;
@@ -646,6 +657,10 @@ function pollJob(jobId) {
         clearInterval(state.pollTimer);
         state.pollTimer = null;
         if (state.currentJobType === "check-updates") {
+          // The finished job is the source of truth for the list, whatever
+          // the view was bound to while it ran.
+          state.checkJobId = jobId;
+          state.cachedJobId = jobId;
           if (job.summary && Object.keys(job.summary).length > 0) state.checkSummary = job.summary;
           await loadResultPage(true);
         }
@@ -697,6 +712,8 @@ function pollJob(jobId) {
       updateProgress(0, 0, false);
       updateControlButtons();
       setStatus(`Lost contact with the server (${error.message}). Reopen the panel to reload results.`);
+    } finally {
+      tickInFlight = false;
     }
   }, POLL_MS);
 }

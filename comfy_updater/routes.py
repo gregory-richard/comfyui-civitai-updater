@@ -9,6 +9,7 @@ from .constants import CACHE_SCHEMA_VERSION, SUPPORTED_MODEL_TYPES
 from .jobs import MATURE_MODES, _normalize_cached_item_urls
 from .path_resolver import normalize_model_types
 from .sidecar import read_json, write_json
+from .updater_service import sidecar_seed_item
 
 try:
     from server import PromptServer
@@ -86,9 +87,22 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
         # type must not make the other types vanish from the panel.
         cache_data = await asyncio.to_thread(read_json, cache_path)
         seed_items = _seed_items_from_cache(cache_data)
+        seeded_paths = {str(item.get("modelPath") or "").lower() for item in seed_items}
 
         def runner(progress, item_cb, control):
             nonlocal item_count
+
+            def sync_seeds(files):
+                # Without a previous check there is nothing stale to correct.
+                if not seed_items:
+                    return
+                current_paths = {str(entry["path"]).lower() for entry in files}
+                job_manager.sync_seeds_with_disk(
+                    control.job_id,
+                    payload["modelTypes"],
+                    current_paths,
+                    _seed_items_for_new_files(files, seeded_paths),
+                )
 
             def item_cb_with_progress(item):
                 nonlocal item_count
@@ -99,7 +113,7 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
                     _write_progress(progress_path, job_ref)
 
             summary, items = updater_service.run_check_updates(
-                payload, progress, item_cb_with_progress, control,
+                payload, progress, item_cb_with_progress, control, files_callback=sync_seeds,
             )
             # A check of a subset of types replaces only that subset in the
             # cache; the previous results for the other types are kept, so
@@ -395,6 +409,24 @@ def _merge_check_items(cache_data, fresh_items: list[dict], model_types: list[st
         if item.get("modelType") not in checked_types
     ]
     return carried + list(fresh_items)
+
+
+def _seed_items_for_new_files(files: list[dict], known_paths: set[str]) -> list[dict]:
+    """Seed items for files the previous check never saw.
+
+    Built from each file's .civitai.info so the provisional view already knows
+    which versions are installed; files without a usable sidecar get no seed
+    and simply appear once they are checked.
+    """
+    seeded: list[dict] = []
+    for entry in files:
+        if str(entry["path"]).lower() in known_paths:
+            continue
+        seed = sidecar_seed_item(entry)
+        if seed:
+            seed["_seeded"] = True
+            seeded.append(seed)
+    return seeded
 
 
 def _write_progress(progress_path, job_ref) -> None:

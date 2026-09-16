@@ -317,6 +317,91 @@ class JobManagerTests(unittest.TestCase):
         fresh = [item for item in job.items if not item.get("_seeded")]
         self.assertEqual([fresh_a], fresh)
 
+    def test_sync_seeds_with_disk_hides_releases_downloaded_since_last_check(self) -> None:
+        # The last check saw only the Krea file and offered the H3 release; the
+        # H3 file was downloaded afterwards, and an old file was deleted.
+        h3 = {
+            "versionId": "h3", "versionName": "H3", "versionDate": "2026-09-14T00:00:00Z",
+            "baseModel": "MiniMax H3", "previewUrl": "", "previewType": "image",
+            "versionUrl": "", "downloadUrl": "",
+        }
+        krea_seed = make_item(
+            model_id="m1", model_name="Face", model_type="lora",
+            local_version_id="krea", local_version_name="Krea",
+            local_version_date="2026-06-30T00:00:00Z", base_model="Krea 2",
+            model_path="C:\\models\\krea\\face.safetensors", remote_versions=[h3],
+        )
+        gone_seed = make_item(
+            model_id="m2", model_name="Gone", model_type="lora",
+            local_version_id="old", local_version_name="Old",
+            local_version_date="2026-01-01T00:00:00Z", base_model="Krea 2",
+            model_path="C:\\models\\krea\\gone.safetensors", remote_versions=[],
+        )
+        fresh = make_item(
+            model_id="m3", model_name="Fresh", model_type="lora",
+            local_version_id="f", local_version_name="F",
+            local_version_date="2026-01-01T00:00:00Z", base_model="Krea 2",
+            model_path="C:\\models\\krea\\fresh.safetensors", remote_versions=[],
+        )
+        # A checkpoint is not part of this lora-only check, so its absence from
+        # the discovered files says nothing about whether it still exists.
+        other_type_seed = make_item(
+            model_id="m4", model_name="Ckpt", model_type="checkpoint",
+            local_version_id="c", local_version_name="C",
+            local_version_date="2026-01-01T00:00:00Z", base_model="SDXL 1.0",
+            model_path="C:\\models\\ckpt.safetensors", remote_versions=[],
+        )
+        for seed in (krea_seed, gone_seed, other_type_seed):
+            seed["_seeded"] = True
+        self.job.status = "running"
+        self.job.items = [krea_seed, gone_seed, fresh, other_type_seed]
+        self.job.seededPaths = {
+            seed["modelPath"].lower() for seed in (krea_seed, gone_seed, other_type_seed)
+        }
+
+        before = self.manager.get_items("job-1", mode="updates")
+        self.assertEqual(["m1"], [card["modelId"] for card in before["items"]])
+
+        h3_seed = {
+            "modelPath": "C:\\models\\h3\\face.safetensors",
+            "modelType": "lora",
+            "modelId": "m1",
+            "baseModel": "MiniMax H3",
+            "localVersionId": "h3",
+            "localVersionName": "H3",
+            "localVersionDate": "2026-09-14T00:00:00Z",
+            "remoteVersions": [],
+            "status": "ok",
+            "_seeded": True,
+        }
+        # A seed for a path that already has a fresh result must not be added.
+        duplicate = dict(h3_seed, modelPath="C:\\models\\krea\\FRESH.safetensors")
+        current = {
+            "c:\\models\\krea\\face.safetensors",
+            "c:\\models\\krea\\fresh.safetensors",
+            "c:\\models\\h3\\face.safetensors",
+        }
+        self.manager.sync_seeds_with_disk("job-1", ["lora"], current, [h3_seed, duplicate])
+
+        paths = [item["modelPath"] for item in self.job.items]
+        self.assertEqual(
+            ["C:\\models\\krea\\face.safetensors", "C:\\models\\krea\\fresh.safetensors",
+             "C:\\models\\ckpt.safetensors", "C:\\models\\h3\\face.safetensors"],
+            paths,
+        )
+        # The new seed is replaceable once its file is re-checked.
+        self.assertEqual(
+            {"c:\\models\\krea\\face.safetensors", "c:\\models\\ckpt.safetensors",
+             "c:\\models\\h3\\face.safetensors"},
+            self.job.seededPaths,
+        )
+        after = self.manager.get_items("job-1", mode="updates")
+        self.assertEqual([], after["items"])
+
+    def test_sync_seeds_with_disk_ignores_unknown_jobs(self) -> None:
+        self.manager.sync_seeds_with_disk("missing", ["lora"], set(), [{"modelPath": "C:\\a.safetensors"}])
+        self.assertNotIn("missing", self.manager._jobs)
+
     def test_finished_jobs_are_pruned(self) -> None:
         from comfy_updater import jobs as jobs_module
 

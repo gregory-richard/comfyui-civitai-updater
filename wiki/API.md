@@ -48,8 +48,11 @@ Request body: same as the scan job.
 Response: `jobId`, or HTTP 409 as above.
 
 The job is seeded with every item of the previous check so the panel keeps
-showing them (marked provisional) while models are re-checked. When the job
-finishes, the items of the checked model types are replaced and the items of
+showing them (marked provisional) while models are re-checked. Once the job has
+listed the files of the checked types, those seeds are aligned with the disk:
+seeds for deleted files are dropped, and new files with a usable
+`.civitai.info` get a seed built from it, so a release downloaded since the
+last check is not offered as new. When the job finishes, the items of the checked model types are replaced and the items of
 any other type are carried over, then the whole set is saved as the new cache.
 
 ## `GET /civitai-updater/jobs/active`
