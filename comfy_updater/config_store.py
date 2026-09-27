@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from .constants import SUPPORTED_MODEL_TYPES
-from .sidecar import quarantine_corrupt_file
+from .sidecar import quarantine_corrupt_file, write_json
 
 
 DEFAULT_CONFIG = {
@@ -28,6 +28,7 @@ class ConfigStore:
         self.data_dir = data_dir
         self.config_path = self.data_dir / "config.json"
         self._config = deepcopy(DEFAULT_CONFIG)
+        self._writable = True
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._load()
 
@@ -37,14 +38,19 @@ class ConfigStore:
             return
 
         try:
-            loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+            # Bytes let json detect UTF-8 with or without a BOM, UTF-16 and UTF-32.
+            loaded = json.loads(self.config_path.read_bytes())
         except OSError as exc:
-            # Unreadable, not corrupt: keep defaults in memory but leave the
-            # file alone so a transient error never overwrites the API key
-            # and custom paths.
-            print(f"Civitai updater: could not read {self.config_path} ({exc}); using defaults for this session.")
+            # Unreadable, not corrupt: keep defaults in memory and never write
+            # them back, or the panel's first settings sync would overwrite the
+            # API key and custom paths.
+            self._writable = False
+            print(
+                f"Civitai updater: could not read {self.config_path} ({exc}); using defaults for this session. "
+                "Settings changes will not be saved until ComfyUI is restarted."
+            )
             return
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
             backup = quarantine_corrupt_file(self.config_path)
             print(
                 f"Civitai updater: {self.config_path} is not valid JSON ({exc}). "
@@ -112,10 +118,8 @@ class ConfigStore:
         return merged
 
     def _save(self) -> None:
-        self.config_path.write_text(
-            json.dumps(self._config, indent=2),
-            encoding="utf-8",
-        )
+        if self._writable:
+            write_json(self.config_path, self._config)
 
     def get(self) -> dict:
         return deepcopy(self._config)

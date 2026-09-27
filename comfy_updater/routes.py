@@ -8,7 +8,7 @@ from aiohttp import web
 from .constants import CACHE_SCHEMA_VERSION, SUPPORTED_MODEL_TYPES
 from .jobs import MATURE_MODES, _normalize_cached_item_urls
 from .path_resolver import normalize_model_types
-from .sidecar import read_json, write_json
+from .sidecar import read_data_file, write_json
 from .updater_service import sidecar_seed_item
 
 try:
@@ -85,7 +85,7 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
         # showing them (marked provisional) while models are re-checked. Every
         # cached item is carried, not just the requested types: a check of one
         # type must not make the other types vanish from the panel.
-        cache_data = await asyncio.to_thread(read_json, cache_path)
+        cache_data = await asyncio.to_thread(read_data_file, cache_path)
         seed_items = _seed_items_from_cache(cache_data)
         seeded_paths = {str(item.get("modelPath") or "").lower() for item in seed_items}
 
@@ -142,7 +142,7 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
     @routes.get("/civitai-updater/last-check")
     async def get_last_check(request):  # noqa: ARG001
         progress_path = config_store.data_dir / "progress.json"
-        progress_data = read_json(progress_path)
+        progress_data = read_data_file(progress_path)
 
         active = job_manager.get_active()
         if progress_data and active:
@@ -161,7 +161,7 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
             progress_path.unlink(missing_ok=True)
 
         cache_path = config_store.data_dir / "last_check.json"
-        data = read_json(cache_path)
+        data = await asyncio.to_thread(read_data_file, cache_path)
         # The inspection walks every model root on disk — keep it off the
         # server event loop so large libraries don't stall other requests.
         current_paths, sidecar_warnings = await asyncio.to_thread(

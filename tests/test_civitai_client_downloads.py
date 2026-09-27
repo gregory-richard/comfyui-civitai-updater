@@ -50,5 +50,27 @@ class DownloadFileTruncationTests(unittest.TestCase):
             self.assertEqual(b"a" * 6 + b"b" * 6, target.read_bytes())
 
 
+class PreviewAuthTests(unittest.TestCase):
+    def test_api_key_goes_only_to_civitai_over_https(self) -> None:
+        client = CivitaiClient(api_key="secret", timeout_seconds=5, max_retries=0)
+        for url, sends_key in (
+            ("https://image.civitai.com/x/preview.jpeg", True),
+            ("https://civitai.red/api/download/1", True),
+            ("http://image.civitai.com/x/preview.jpeg", False),
+            ("https://example.com/preview.png", False),
+            ("https://civitai.com.example.com/preview.png", False),
+        ):
+            self.assertEqual(sends_key, "Authorization" in client._media_headers(url), url)
+
+    def test_preview_from_another_host_is_fetched_without_the_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = _client_streaming([b"png"])
+            client.default_headers["Authorization"] = "Bearer secret"
+
+            client.download_file("https://example.com/x.png", Path(tmpdir) / "preview.png")
+
+            self.assertNotIn("Authorization", client.session.get.call_args.kwargs["headers"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+from urllib.parse import urlsplit
+
 import requests
 
 from .constants import (
@@ -99,7 +101,7 @@ class CivitaiClient:
         tmp_path = target_path.with_suffix(f"{target_path.suffix}.tmp")
         try:
             with self.session.get(
-                url, timeout=self.timeout_seconds, headers=self.default_headers, stream=True
+                url, timeout=self.timeout_seconds, headers=self._media_headers(url), stream=True
             ) as response:
                 if not response.ok:
                     return False
@@ -194,6 +196,16 @@ class CivitaiClient:
         finally:
             tmp_video.unlink(missing_ok=True)
 
+    def _media_headers(self, url: str) -> dict:
+        """Headers for a preview download.
+
+        Preview URLs come from sidecars, which other tools and shared model
+        packs also write, so the API key goes only to Civitai over https.
+        """
+        if _is_civitai_https_url(url):
+            return self.default_headers
+        return {"User-Agent": USER_AGENT}
+
     def _get_json(self, url: str, *, raise_on_error: bool = False) -> dict | None:
         last_error = None
         for attempt in range(self.max_retries + 1):
@@ -243,7 +255,7 @@ class CivitaiClient:
             with self.session.get(
                 url,
                 timeout=self.timeout_seconds,
-                headers=self.default_headers,
+                headers=self._media_headers(url),
                 stream=True,
             ) as response:
                 if not response.ok:
@@ -279,6 +291,7 @@ def _extract_first_frame(ffmpeg_path: str, video_path: Path, tmp_png: Path, targ
             capture_output=True,
             text=True,
             check=False,
+            timeout=120,
         )
         if process.returncode != 0 or not tmp_png.exists() or tmp_png.stat().st_size == 0:
             tmp_png.unlink(missing_ok=True)
@@ -317,6 +330,15 @@ def _resolve_ffmpeg() -> str | None:
         )
     _ffmpeg_cache["path"] = path
     return path
+
+
+_CIVITAI_DOMAINS = ("civitai.red", "civitai.com")
+
+
+def _is_civitai_https_url(url: str) -> bool:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    return parts.scheme == "https" and any(host == domain or host.endswith(f".{domain}") for domain in _CIVITAI_DOMAINS)
 
 
 def _retry_delay_seconds(attempt: int) -> float:

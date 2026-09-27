@@ -158,6 +158,10 @@ class JobManagerTests(unittest.TestCase):
         self.assertEqual("EarlyAccess", grouped["newVersions"][0]["availability"])
         self.assertEqual("EarlyAccess", grouped["latestAvailability"])
         self.assertTrue(grouped["localVersions"][1]["metadataOnly"])
+        # Cached items predating filePath still copy the weights, not the sidecar.
+        self.assertEqual("C:\\models\\one-a.civitai.info", grouped["localVersions"][1]["modelPath"])
+        self.assertEqual("C:\\models\\one-a.safetensors", grouped["localVersions"][1]["filePath"])
+        self.assertEqual("C:\\models\\one-b.safetensors", grouped["localVersions"][0]["filePath"])
         self.assertNotIn("v-old", [entry["versionId"] for entry in grouped["newVersions"]])
 
         summary = self.manager.summarize_check_items({"mode": "check", "total": 2}, self.job.items)

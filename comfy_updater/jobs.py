@@ -7,7 +7,7 @@ import time
 import uuid
 
 from .base_models import UNKNOWN_FAMILY, base_family, family_sort_key
-from .constants import MODEL_PAGE_BASE_URL, SUPPORTED_MODEL_TYPES
+from .constants import INFO_SIDECAR_SUFFIX, MODEL_PAGE_BASE_URL, SUPPORTED_MODEL_TYPES
 
 _MAX_FINISHED_JOBS = 5
 
@@ -506,9 +506,12 @@ def _parse_iso(value: str):
     if not value or not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # Another tool's sidecar may carry a bare date or no offset; read it as
+    # UTC, since comparing it with Civitai's aware dates would raise.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _normalize_cached_item_urls(item: dict) -> dict:
@@ -605,6 +608,7 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
                     "baseModel": member.get("baseModel", ""),
                     "publishedAt": member.get("localVersionDate", ""),
                     "modelPath": member.get("modelPath", ""),
+                    "filePath": _file_path(member),
                     "metadataOnly": bool(member.get("metadataOnly")),
                     "previewUrl": member.get("localPreviewUrl", ""),
                     "previewType": member.get("localPreviewType", "image"),
@@ -726,6 +730,7 @@ def _build_ungrouped_item(item: dict, provisional: bool) -> dict:
             "baseModel": item.get("baseModel", ""),
             "publishedAt": item.get("localVersionDate", ""),
             "modelPath": item.get("modelPath", ""),
+            "filePath": _file_path(item),
             "metadataOnly": bool(item.get("metadataOnly")),
             "previewUrl": item.get("localPreviewUrl", ""),
             "previewType": item.get("localPreviewType", "image"),
@@ -785,6 +790,18 @@ def _sort_grouped(items: list[dict], sort: str | None) -> list[dict]:
             key=lambda group: (-int(group.get("daysBehind") or 0), (group.get("modelName") or "").lower()),
         )
     return items
+
+
+def _file_path(item: dict) -> str:
+    """The weights file a local version row copies, never its sidecar."""
+    if item.get("filePath"):
+        return item["filePath"]
+    # Results cached before filePath existed carry only the sidecar path of a
+    # metadata-only entry; the extension then falls back to .safetensors.
+    model_path = item.get("modelPath", "")
+    if model_path.lower().endswith(INFO_SIDECAR_SUFFIX):
+        return model_path[: -len(INFO_SIDECAR_SUFFIX)] + ".safetensors"
+    return model_path
 
 
 def _filename(path: str) -> str:

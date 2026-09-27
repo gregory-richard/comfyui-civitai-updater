@@ -91,6 +91,10 @@ const state = {
   lastPageKey: "",
   freshPaths: new Set(),
   facets: { modelTypes: [], baseModels: [] },
+  scopeTypes: [...MODEL_TYPES],
+  forceRehash: false,
+  refetchMetadata: false,
+  statusText: "",
 
   rootEl: null,
   cacheInfoEl: null,
@@ -116,7 +120,11 @@ const state = {
   jobControlsEl: null,
 
   settingsSyncTimer: null,
-  suspendSettingsSync: false,
+  // ComfyUI calls every setting's onChange as it registers, before setup().
+  // Syncing then would post this install's stored values over the backend's
+  // config (a fresh ComfyUI folder would erase the API key and custom paths),
+  // so syncing stays off until the backend's values have been loaded.
+  suspendSettingsSync: true,
   progressEtaEl: null,
   lightboxKeyHandler: null,
   recoveringJob: false,
@@ -147,8 +155,7 @@ app.registerExtension({
   ],
   async setup() {
     injectStyles();
-    await hydrateSettingsFromBackend();
-    scheduleSettingsSync(true);
+    if (await hydrateSettingsFromBackend()) scheduleSettingsSync(true);
     app.extensionManager.registerSidebarTab({
       id: TAB_ID,
       icon: TAB_ICON,
@@ -175,16 +182,16 @@ async function renderTab(el) {
         <summary>Settings</summary>
         <div class="cu-settings-body">
           <div class="cu-label">Model Scope</div>
-          <div class="cu-row">${MODEL_TYPES.map((t) => `<label class="cu-chip" title="Include ${t} in jobs"><input type="checkbox" data-type="${t}" checked><span>${t.charAt(0).toUpperCase() + t.slice(1)}</span></label>`).join("")}</div>
+          <div class="cu-row">${MODEL_TYPES.map((t) => `<label class="cu-chip" title="Include ${t} in jobs"><input type="checkbox" data-type="${t}"${state.scopeTypes.includes(t) ? " checked" : ""}><span>${t.charAt(0).toUpperCase() + t.slice(1)}</span></label>`).join("")}</div>
           <div class="cu-label">Options</div>
           <label class="cu-option">
-            <input id="cu-rehash" type="checkbox">
+            <input id="cu-rehash" type="checkbox"${state.forceRehash ? " checked" : ""}>
             <span>Force rehash</span>
             <span class="cu-info-trigger cu-tooltip" data-tooltip="Re-identify every model by recomputing its SHA256 hash. Use this after manually replacing model files — the cache won't know the file changed otherwise.">ⓘ</span>
           </label>
           <p class="cu-option-hint">Re-identify models from scratch. Use after replacing files.</p>
           <label class="cu-option">
-            <input id="cu-refetch" type="checkbox">
+            <input id="cu-refetch" type="checkbox"${state.refetchMetadata ? " checked" : ""}>
             <span>Refetch metadata that already exists</span>
             <span class="cu-info-trigger cu-tooltip" data-tooltip="Makes Fetch Missing Metadata re-pull info from Civitai for models that already have a .civitai.info file, instead of skipping them. Uses sidecar version IDs, so no re-hashing.">ⓘ</span>
           </label>
@@ -267,6 +274,8 @@ async function renderTab(el) {
   state.stopEl = root.querySelector("#cu-stop");
   state.jobControlsEl = root.querySelector("#cu-job-controls");
   bindEvents(root);
+  state.statusEl.textContent = state.statusText;
+  renderCacheInfo();
   renderRoots();
   renderArrange();
   renderSidecarWarnings();
@@ -412,6 +421,20 @@ function bindEvents(root) {
     state.rootsExpanded = !state.rootsExpanded;
     renderRoots();
   });
+  // ComfyUI rebuilds the tab each time it is opened, so the job options are
+  // kept in state rather than read back from the checkboxes.
+  root.addEventListener("change", (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.dataset.type) {
+      const type = target.dataset.type;
+      state.scopeTypes = MODEL_TYPES.filter((t) => (t === type ? target.checked : state.scopeTypes.includes(t)));
+    } else if (target.id === "cu-rehash") {
+      state.forceRehash = target.checked;
+    } else if (target.id === "cu-refetch") {
+      state.refetchMetadata = target.checked;
+    }
+  });
   root.querySelector("#cu-size").addEventListener("change", async (ev) => {
     const next = Number(ev.target.value || PAGE_SIZES[0]);
     state.pageSize = PAGE_SIZES.includes(next) ? next : PAGE_SIZES[0];
@@ -507,10 +530,10 @@ async function startJob(endpoint, type) {
     setStatus("Select at least one model type in Settings.");
     return;
   }
-  const forceRehash = Boolean(state.rootEl?.querySelector("#cu-rehash")?.checked);
+  const forceRehash = state.forceRehash;
   const payload = {
     modelTypes,
-    refetchMetadata: Boolean(state.rootEl?.querySelector("#cu-refetch")?.checked),
+    refetchMetadata: state.refetchMetadata,
     forceRehash,
   };
 
@@ -743,8 +766,14 @@ async function loadResultPage(force) {
       thenBy: state.thenBy || "none",
       mature: state.matureMode || "show",
     });
-    for (const modelType of state.filterTypes || []) query.append("modelType", modelType);
-    for (const baseModel of state.filterBases || []) query.append("baseModel", baseModel);
+    // Listing every option would still drop cards that have no value for it
+    // (a version without a base model), so a full selection sends no filter.
+    if (!selectsAll(state.filterTypes, state.facets.modelTypes)) {
+      for (const modelType of state.filterTypes || []) query.append("modelType", modelType);
+    }
+    if (!selectsAll(state.filterBases, state.facets.baseModels)) {
+      for (const baseModel of state.filterBases || []) query.append("baseModel", baseModel);
+    }
     for (const key of state.collapsed) query.append("collapsed", key);
     const data = await getJson(`/civitai-updater/jobs/${state.checkJobId}/items?${query.toString()}`);
     if (requestSeq !== state.resultRequestSeq) return;
@@ -786,19 +815,22 @@ function summaryLine(s) {
 }
 
 function renderProgressCounts() {
-  if (!state.statusEl) return;
   const s = state.currentSummary;
   if (!s || !s.mode) {
     if (state.currentJobId) {
-      state.statusEl.textContent = `Processing ${state.currentProgress} of ${state.currentTotal}`;
+      setStatus(`Processing ${state.currentProgress} of ${state.currentTotal}`);
     }
     return;
   }
   if (s.mode === "scan") {
-    state.statusEl.textContent = `Scan: ${s.total || 0} total \u00b7 ${s.refreshed || 0} refreshed \u00b7 ${s.skipped || 0} skipped \u00b7 ${s.errors || 0} errors`;
+    setStatus(`Scan: ${scanCounts(s)}`);
     return;
   }
-  state.statusEl.textContent = summaryLine(s);
+  setStatus(summaryLine(s));
+}
+
+function scanCounts(s) {
+  return `${s.total || 0} total \u00b7 ${s.refreshed || 0} refreshed \u00b7 ${s.skipped || 0} skipped \u00b7 ${s.notFound || 0} not found \u00b7 ${s.errors || 0} errors`;
 }
 
 function renderCacheInfo() {
@@ -887,7 +919,7 @@ function renderScanReport() {
   }
   state.scanReportEl.classList.add("is-visible");
   const s = state.scanSummary;
-  state.scanReportEl.innerHTML = `<div class="cu-small"><strong>Last Scan</strong> \u00b7 ${s.total || 0} total \u00b7 ${s.refreshed || 0} refreshed \u00b7 ${s.skipped || 0} skipped \u00b7 ${s.errors || 0} errors<br>${escapeHtml(state.scanHint || "")}</div>`;
+  state.scanReportEl.innerHTML = `<div class="cu-small"><strong>Last Scan</strong> \u00b7 ${scanCounts(s)}<br>${escapeHtml(state.scanHint || "")}</div>`;
 }
 
 function buildResultCard(item, cardIndex) {
@@ -920,7 +952,7 @@ function buildResultCard(item, cardIndex) {
         <span class="cu-ver-date">${escapeHtml(date || "—")}</span>
         <span class="cu-ver-base">${escapeHtml(v.baseModel || "—")}</span>
         <span class="cu-ver-main">
-          <span class="cu-ver-link cu-copy-path" data-path="${escapeHtml(v.modelPath || "")}" title="Click to copy file path">${escapeHtml(v.versionName || "?")}</span>
+          <span class="cu-ver-link cu-copy-path" data-path="${escapeHtml(v.filePath || v.modelPath || "")}" title="Click to copy file path">${escapeHtml(v.versionName || "?")}</span>
         </span>
       </div>`;
   }).join("");
@@ -1037,11 +1069,16 @@ function renderResults() {
     const noBaseSelection = Array.isArray(state.filterBases) && state.facets.baseModels.length && state.filterBases.length === 0;
     if (noTypeSelection || noBaseSelection) {
       appendEmpty("No filter options selected.");
-    } else {
-      appendEmpty(state.resultTotal === 0 ? "No updates found." : "No items on this page.");
+      renderPagination();
+      return;
     }
-    renderPagination();
-    return;
+    // With every band collapsed there are no cards, but the headers are
+    // still the only way to expand them again.
+    if (!hasCollapsedBand()) {
+      appendEmpty(state.resultTotal === 0 ? "No updates found." : "No items on this page.");
+      renderPagination();
+      return;
+    }
   }
   // Bands are rendered from the outline rather than from the items, so a
   // collapsed band keeps its header - and with it, the way back.
@@ -1069,8 +1106,10 @@ function renderResults() {
       const collapsed = state.collapsed.has(group.key);
       const buckets = byPrimary.get(group.key);
       const hasCards = Boolean(buckets && buckets.size);
-      // A band whose cards all sit on another page is not on this one.
-      if (!hasCards && !collapsed) continue;
+      const hasCollapsedSub = (group.subgroups || []).some((sub) => state.collapsed.has(sub.key));
+      // A band whose cards all sit on another page is not on this one, unless
+      // it holds a collapsed header that must stay reachable.
+      if (!hasCards && !collapsed && !hasCollapsedSub) continue;
 
       const continued = firstBand && hasCards && state.startsMidPrimary;
       state.resultsEl.appendChild(renderGroupHead(group, collapsed, continued));
@@ -1098,6 +1137,12 @@ function renderResults() {
 
   renderMatureNotice();
   renderPagination();
+}
+
+function hasCollapsedBand() {
+  if (state.groupBy === "none") return false;
+  return (state.groups || []).some((group) => state.collapsed.has(group.key)
+    || (group.subgroups || []).some((sub) => state.collapsed.has(sub.key)));
 }
 
 function countLabel(models, releases) {
@@ -1286,6 +1331,10 @@ function filterSummary(options, selected, capitalizeValues) {
   return `${active.length} selected`;
 }
 
+function selectsAll(selection, options) {
+  return Array.isArray(selection) && options.length > 0 && options.every((value) => selection.includes(value));
+}
+
 function syncFacetSelection(selectionKey, facetKey) {
   const available = state.facets[facetKey] || [];
   const current = state[selectionKey] || [];
@@ -1354,12 +1403,7 @@ function updateControlButtons() {
 }
 
 function selectedTypes() {
-  if (!state.rootEl) return [...MODEL_TYPES];
-  const selected = [];
-  for (const box of state.rootEl.querySelectorAll("[data-type]")) {
-    if (box.checked) selected.push(box.dataset.type);
-  }
-  return selected;
+  return [...state.scopeTypes];
 }
 
 function resetEta() {
@@ -1437,6 +1481,7 @@ function updateProgress(current, total, visible) {
 }
 
 function setStatus(message) {
+  state.statusText = message;
   if (state.statusEl) state.statusEl.textContent = message;
 }
 
@@ -1458,7 +1503,6 @@ async function hydrateSettingsFromBackend() {
   try {
     const data = await getJson("/civitai-updater/config");
     const cfg = data.config || {};
-    state.suspendSettingsSync = true;
     if (cfg.hasApiKey) {
       setSetting(SETTINGS.apiKey, "***HIDDEN***");
     } else {
@@ -1482,10 +1526,11 @@ async function hydrateSettingsFromBackend() {
     state.matureMode = String(cfg.matureMode || "show");
     setSetting(SETTINGS.matureMode, state.matureMode);
     state.roots = data.effectiveRoots || {};
-  } catch (error) {
-    console.warn("Civitai updater: failed to hydrate settings", error);
-  } finally {
     state.suspendSettingsSync = false;
+    return true;
+  } catch (error) {
+    console.warn("Civitai updater: failed to load settings; changes will not be saved until the page is reloaded", error);
+    return false;
   }
 }
 

@@ -22,7 +22,7 @@ The plugin has three layers:
 - `archived_updates.py`: persistent list of hidden releases in `.civitai_updater/archived_updates.json`
 - `base_models.py`: rolls Civitai base-model strings up into families for grouping
 - `constants.py`: API URLs, supported types and extensions, sidecar suffixes, plugin version
-- `node_info.py`: the status node, registered through both the legacy mappings and the V3 entrypoint
+- `node_info.py`: the status node. ComfyUI registers it from the legacy mappings; the V3 `comfy_entrypoint` is only a fallback that ComfyUI does not reach while those mappings exist
 
 ## Frontend module
 

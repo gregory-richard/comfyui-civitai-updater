@@ -15,6 +15,7 @@ from .sidecar import (
     SIDECAR_ERROR_READ,
     SIDECAR_ERROR_SAFETENSORS,
     SIDECAR_ERROR_TOO_LARGE,
+    model_file_path,
     read_json_diagnostic,
 )
 
@@ -86,6 +87,7 @@ def list_model_files(
                         {
                             "modelType": model_type,
                             "path": file_path,
+                            "filePath": file_path,
                             "infoPath": file_path.with_suffix(INFO_SIDECAR_SUFFIX),
                             "previewPath": file_path.with_suffix(PREVIEW_SIDECAR_SUFFIX),
                             "metadataOnly": False,
@@ -98,12 +100,14 @@ def list_model_files(
         for model_type, info_path in sidecar_candidates:
             if _info_stem_key(info_path) in weight_stems:
                 continue
-            if not _is_valid_info_sidecar(info_path, sidecar_warnings):
+            info = _read_identifying_sidecar(info_path, sidecar_warnings)
+            if info is None:
                 continue
             files.append(
                 {
                     "modelType": model_type,
                     "path": info_path,
+                    "filePath": model_file_path(info_path, info),
                     "infoPath": info_path,
                     "previewPath": _preview_path_for_info(info_path),
                     "metadataOnly": True,
@@ -126,13 +130,15 @@ def _preview_path_for_info(info_path: Path) -> Path:
     return info_path.with_name(f"{base_name}{PREVIEW_SIDECAR_SUFFIX}")
 
 
-def _is_valid_info_sidecar(info_path: Path, sidecar_warnings: list[dict] | None = None) -> bool:
+def _read_identifying_sidecar(info_path: Path, sidecar_warnings: list[dict] | None = None) -> dict | None:
     payload, error = read_json_diagnostic(info_path)
     if error and sidecar_warnings is not None:
         _append_sidecar_warning(sidecar_warnings, info_path, error)
     if not isinstance(payload, dict):
-        return False
-    return _has_identifier(payload.get("modelId")) and _has_identifier(payload.get("id"))
+        return None
+    if not (_has_identifier(payload.get("modelId")) and _has_identifier(payload.get("id"))):
+        return None
+    return payload
 
 
 def _append_sidecar_warning(warnings: list[dict], info_path: Path, error: str) -> None:

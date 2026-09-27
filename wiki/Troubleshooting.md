@@ -18,12 +18,12 @@ usually originate from other custom nodes using old APIs. They are not automatic
 ## No models found
 
 1. Verify selected model types.
-2. Verify effective root counts shown in the updater tab and expand `Show paths`.
+2. Verify the effective root counts under `Settings -> Resolved Roots` in the updater tab and click `Show`.
 3. Check path source toggles in `Settings -> Civitai Updater`.
 4. Add custom paths in `Settings -> Civitai Updater`.
 5. Re-run scan/check.
 
-## Frequent `not_found` rows
+## Many models counted as `not found`
 
 This means Civitai has no hash match for those local files. Typical reasons:
 

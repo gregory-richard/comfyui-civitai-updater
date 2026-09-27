@@ -13,9 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The package declares 3.9 as its floor; the newest line catches
-        # deprecations early.
-        python-version: ["3.9", "3.12"]
+        # The package declares 3.9 as its floor; 3.13 is what the ComfyUI
+        # portable build ships.
+        python-version: ["3.9", "3.12", "3.13"]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

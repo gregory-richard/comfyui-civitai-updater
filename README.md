@@ -7,8 +7,9 @@ Civitai releases, and tells you which ones have moved on without you.
 
 It reads what you already have — model files and their `.civitai.info`
 sidecars — identifies each one by SHA256 hash, and lists only the models with
-a newer release. Nothing is downloaded for you and nothing is overwritten: the
-panel links you to the release page and gets out of the way.
+a newer release. No model is downloaded for you and no model file is touched:
+the panel links you to the release page and gets out of the way. It only
+writes `.civitai.info` and `.preview.png` sidecars next to your models.
 
 ![The Civitai Updater panel in the ComfyUI sidebar](assets/docs/panel-sidebar.png)
 

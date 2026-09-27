@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .constants import INFO_SIDECAR_SUFFIX, PREVIEW_SIDECAR_SUFFIX
+from .constants import INFO_SIDECAR_SUFFIX, PREVIEW_SIDECAR_SUFFIX, SUPPORTED_MODEL_EXTENSIONS
 
 _MAX_JSON_BYTES = 16 * 1024 * 1024
 
@@ -23,9 +23,42 @@ def preview_sidecar_path(model_path: Path) -> Path:
     return model_path.with_suffix(f"{PREVIEW_SIDECAR_SUFFIX}")
 
 
+def model_file_path(info_path: Path, info: dict | None = None) -> Path:
+    """Where the weights described by a metadata-only sidecar would live.
+
+    The sidecar names the file Civitai serves, so its extension is reused;
+    anything unusable falls back to .safetensors.
+    """
+    base_name = info_path.name[: -len(INFO_SIDECAR_SUFFIX)]
+    return info_path.with_name(f"{base_name}{_primary_file_extension(info)}")
+
+
+def _primary_file_extension(info: dict | None) -> str:
+    files = info.get("files") if isinstance(info, dict) else None
+    entries = [entry for entry in files if isinstance(entry, dict)] if isinstance(files, list) else []
+    primary = next((entry for entry in entries if entry.get("primary")), None) or next(
+        (entry for entry in entries if entry.get("type") == "Model"), None
+    )
+    suffix = Path(str(primary.get("name") or "")).suffix.lower() if primary else ""
+    return suffix if suffix in SUPPORTED_MODEL_EXTENSIONS else ".safetensors"
+
+
 def read_json(path: Path) -> dict | None:
     payload, _error = read_json_diagnostic(path)
     return payload
+
+
+def read_data_file(path: Path) -> dict | None:
+    """Read one of the plugin's own JSON files.
+
+    Unlike a sidecar it has no size cap: the saved check results grow with the
+    library and pass 16 MB at a few thousand models.
+    """
+    try:
+        payload = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def read_json_diagnostic(path: Path) -> tuple[dict | None, str | None]:
@@ -84,5 +117,12 @@ def quarantine_corrupt_file(path: Path) -> Path:
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(f"{path.suffix}.tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise

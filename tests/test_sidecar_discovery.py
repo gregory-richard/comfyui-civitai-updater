@@ -12,6 +12,8 @@ from comfy_updater.sidecar import (
     SIDECAR_ERROR_INVALID_JSON,
     SIDECAR_ERROR_SAFETENSORS,
     SIDECAR_ERROR_TOO_LARGE,
+    read_data_file,
+    read_json,
     read_json_diagnostic,
     write_json,
 )
@@ -42,7 +44,38 @@ class SidecarDiscoveryTests(unittest.TestCase):
             self.assertEqual(info_path, files[0]["path"])
             self.assertEqual(info_path, files[0]["infoPath"])
             self.assertEqual(preview_path, files[0]["previewPath"])
+            self.assertEqual(root / "tracked.safetensors", files[0]["filePath"])
             self.assertTrue(files[0]["metadataOnly"])
+
+    def test_file_path_points_at_weights_not_the_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_json(
+                root / "quant.v2.civitai.info",
+                {
+                    "id": 456,
+                    "modelId": 123,
+                    "files": [
+                        {"name": "notes.zip", "type": "Training Data"},
+                        {"name": "Original_Name.GGUF", "type": "Model", "primary": True},
+                    ],
+                },
+            )
+            weights = root / "saved.safetensors"
+            weights.write_bytes(b"model")
+
+            files = {entry["path"].name: entry for entry in list_model_files({"unet": [root]}, include_sidecar_only=True)}
+
+            self.assertEqual(root / "quant.v2.gguf", files["quant.v2.civitai.info"]["filePath"])
+            self.assertEqual(weights, files["saved.safetensors"]["filePath"])
+
+    def test_saved_results_are_not_held_to_the_sidecar_size_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "last_check.json"
+            write_json(cache_path, {"items": ["x" * 64]})
+            with patch("comfy_updater.sidecar._MAX_JSON_BYTES", 16):
+                self.assertIsNone(read_json(cache_path))
+                self.assertEqual({"items": ["x" * 64]}, read_data_file(cache_path))
 
     def test_sidecar_only_discovery_can_be_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

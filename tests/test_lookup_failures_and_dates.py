@@ -106,6 +106,22 @@ class _RecordingHashClient:
         return f"https://civitai.red/models/{model_id}?modelVersionId={version_id}"
 
 
+class _UnreachableClient:
+    """Every lookup fails, as the real client reports Civitai being down."""
+
+    def get_version(self, version_id):  # noqa: ARG002
+        return None
+
+    def get_version_by_hash(self, sha256_hash):  # noqa: ARG002
+        return None
+
+
+class _FoundByHashClient(_DatelessSidecarClient):
+    def get_version_by_hash(self, sha256_hash):  # noqa: ARG002
+        return {"id": 20, "modelId": 1, "name": "v2", "publishedAt": "2024-01-01T00:00:00Z",
+                "images": [], "files": [{"hashes": {}}]}
+
+
 def _write_model(tmpdir: str, sidecar: dict | None) -> Path:
     model_path = Path(tmpdir) / "example.safetensors"
     model_path.write_bytes(b"not a real model")
@@ -168,6 +184,43 @@ class UpdaterServiceLookupTests(unittest.TestCase):
             # The stub is rewritten so the fresh hash is what gets reused next time.
             self.assertEqual("fresh", read_json(info_sidecar_path(model_path))["files"][0]["hashes"]["SHA256"])
 
+    def test_failed_refetch_keeps_the_identifying_sidecar(self) -> None:
+        sidecar = {"id": 456, "modelId": 123, "name": "Local", "images": []}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = _write_model(tmpdir, sidecar)
+            with patch("comfy_updater.updater_service.sha256_file", return_value="abc"):
+                item = UpdaterService(None)._process_one(
+                    client=_UnreachableClient(), model_path=model_path, model_type="lora",
+                    mode="scan", refetch_metadata=True, force_rehash=False,
+                )
+            self.assertEqual("not_found", item["status"])
+            self.assertEqual(sidecar, read_json(info_sidecar_path(model_path)))
+
+    def test_scan_replaces_a_stub_once_the_model_is_found(self) -> None:
+        stub = {"id": "", "modelId": "", "files": [{"hashes": {"SHA256": "abc"}}]}
+        found = {"id": 7, "modelId": 3, "name": "v1", "model": {"name": "M"}, "images": [], "files": [{"hashes": {}}]}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = _write_model(tmpdir, stub)
+            item = UpdaterService(None)._process_one(
+                client=_RecordingHashClient(found), model_path=model_path, model_type="lora",
+                mode="scan", refetch_metadata=False, force_rehash=False,
+            )
+            self.assertEqual("ok", item["status"])
+            self.assertEqual(7, read_json(info_sidecar_path(model_path))["id"])
+
+    def test_unwritable_sidecar_keeps_the_found_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = _write_model(tmpdir, None)
+            with patch("comfy_updater.updater_service.sha256_file", return_value="abc"), \
+                    patch("comfy_updater.updater_service.write_json", side_effect=PermissionError("read-only")):
+                item = UpdaterService(None)._process_one(
+                    client=_FoundByHashClient(), model_path=model_path, model_type="lora",
+                    mode="check", refetch_metadata=False, force_rehash=False,
+                )
+        self.assertEqual("ok", item["status"])
+        self.assertTrue(item["hasUpdate"])
+        self.assertEqual("30", item["latestVersionId"])
+
 
 class GroupingDateTests(unittest.TestCase):
     def _item(self, local_date: str) -> dict:
@@ -197,6 +250,11 @@ class GroupingDateTests(unittest.TestCase):
         self.assertFalse(group["hasUpdate"])
         self.assertEqual([], group["newVersions"])
 
+    def test_offsetless_local_date_is_compared_as_utc(self) -> None:
+        group = _group_items_by_model([self._item("2024-01-01")])[0]
+        self.assertEqual(["30"], [version["versionId"] for version in group["newVersions"]])
+        self.assertEqual(366, group["daysBehind"])
+
 
 class CorruptStoreTests(unittest.TestCase):
     def test_corrupt_config_is_quarantined_not_overwritten(self) -> None:
@@ -222,6 +280,35 @@ class CorruptStoreTests(unittest.TestCase):
             backups = list(data_dir.glob("archived_updates.json.corrupt-*"))
             self.assertEqual(1, len(backups))
             self.assertEqual(set(), store.get_archived_versions("1"))
+
+    def test_unreadable_config_is_never_written_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            original = '{"apiKey": "secret", "customPaths": {"lora": ["D:/loras"]}}'
+            (data_dir / "config.json").write_text(original, encoding="utf-8")
+            with patch.object(Path, "read_bytes", side_effect=PermissionError("locked")):
+                store = ConfigStore(data_dir)
+            # What the panel's first settings sync posts on a fresh ComfyUI install.
+            store.update({"apiKey": "", "customPaths": {"lora": []}})
+            self.assertEqual(original, (data_dir / "config.json").read_text(encoding="utf-8"))
+
+    def test_config_with_a_bom_or_in_utf16_still_loads(self) -> None:
+        for encoding in ("utf-8-sig", "utf-16"):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                data_dir = Path(tmpdir)
+                (data_dir / "config.json").write_text('{"apiKey": "secret"}', encoding=encoding)
+                self.assertEqual("secret", ConfigStore(data_dir).get()["apiKey"])
+                self.assertEqual([], list(data_dir.glob("config.json.corrupt-*")))
+
+    def test_unreadable_archive_is_never_written_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            original = '{"archivedUpdates": {"1": ["2"]}}'
+            (data_dir / "archived_updates.json").write_text(original, encoding="utf-8")
+            with patch.object(Path, "read_bytes", side_effect=PermissionError("locked")):
+                store = ArchivedUpdateStore(data_dir)
+            store.archive("5", ["6"])
+            self.assertEqual(original, (data_dir / "archived_updates.json").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

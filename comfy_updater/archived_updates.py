@@ -5,7 +5,7 @@ from pathlib import Path
 import threading
 
 from .constants import ARCHIVED_UPDATES_FILENAME
-from .sidecar import quarantine_corrupt_file
+from .sidecar import quarantine_corrupt_file, write_json
 
 
 class ArchivedUpdateStore:
@@ -13,6 +13,7 @@ class ArchivedUpdateStore:
         self.path = data_dir / ARCHIVED_UPDATES_FILENAME
         self._lock = threading.Lock()
         self._data: dict[str, set[str]] = {}
+        self._writable = True
         self._load()
 
     def _load(self) -> None:
@@ -20,13 +21,18 @@ class ArchivedUpdateStore:
             self._save()
             return
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            # Bytes let json detect UTF-8 with or without a BOM, UTF-16 and UTF-32.
+            payload = json.loads(self.path.read_bytes())
         except OSError as exc:
-            # Leave the file untouched: saving now would replace every hidden
-            # version with an empty list.
-            print(f"Civitai updater: could not read {self.path} ({exc}); hidden versions are unavailable this session.")
+            # Leave the file untouched, now and on later hides: saving would
+            # replace every hidden version with this session's list.
+            self._writable = False
+            print(
+                f"Civitai updater: could not read {self.path} ({exc}); hidden versions are unavailable "
+                "and changes to them will not be saved until ComfyUI is restarted."
+            )
             return
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
             backup = quarantine_corrupt_file(self.path)
             print(
                 f"Civitai updater: {self.path} is not valid JSON ({exc}). "
@@ -46,6 +52,8 @@ class ArchivedUpdateStore:
         self._save()
 
     def _save(self) -> None:
+        if not self._writable:
+            return
         payload = {
             "archivedUpdates": {
                 model_id: sorted(version_ids)
@@ -53,10 +61,7 @@ class ArchivedUpdateStore:
                 if version_ids
             }
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
-        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp_path.replace(self.path)
+        write_json(self.path, payload)
 
     def archive(self, model_id: str | int, version_ids: list[str | int]) -> list[str]:
         model_key = str(model_id or "").strip()

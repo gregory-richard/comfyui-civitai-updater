@@ -153,6 +153,9 @@ class UpdaterService:
                     "nsfw": False,
                     "lastCheckedAt": _utc_now(),
                 }
+            # modelPath is the sidecar for a metadata-only entry, so the card
+            # copies this path to the weights instead.
+            item["filePath"] = str(model_entry.get("filePath") or model_path)
 
             if item.get("status") == "ok":
                 stats["resolved"] += 1
@@ -323,7 +326,9 @@ class UpdaterService:
                 "downloadUrl": "",
                 "nsfw": False,
             }
-            if mode == "scan" and not metadata_only and (refetch_metadata or not has_identity):
+            # A failed lookup cannot tell "removed" from "Civitai is down", so
+            # it never replaces a sidecar that already identifies the model.
+            if mode == "scan" and not metadata_only and not has_identity:
                 write_json(
                     info_path,
                     {
@@ -353,7 +358,8 @@ class UpdaterService:
             sidecar_payload.setdefault("extensions", {})
             sidecar_payload["extensions"]["source"] = "comfy-civitai-updater"
             sidecar_payload["extensions"]["updatedAt"] = _utc_now()
-            if refetch_metadata or not existing_info:
+            # A stub from an earlier miss is replaced once the model is found.
+            if refetch_metadata or not has_identity:
                 write_json(info_path, sidecar_payload)
 
             _download_preview_if_needed(client, preview_path, version_data, force=False)
@@ -470,7 +476,12 @@ class UpdaterService:
             sidecar_payload.setdefault("extensions", {})
             sidecar_payload["extensions"]["source"] = "comfy-civitai-updater"
             sidecar_payload["extensions"]["updatedAt"] = _utc_now()
-            write_json(info_path, sidecar_payload)
+            try:
+                write_json(info_path, sidecar_payload)
+            except OSError as exc:
+                # The sidecar only caches this lookup; a read-only folder must
+                # not turn a found update into an error.
+                print(f"Civitai updater: could not write {info_path} ({exc})")
             _download_preview_if_needed(client, preview_path, version_data)
 
         return {
@@ -532,6 +543,7 @@ def sidecar_seed_item(model_entry: dict) -> dict | None:
     preview_url, preview_type = _first_preview(info)
     return {
         "modelPath": str(model_entry["path"]),
+        "filePath": str(model_entry.get("filePath") or model_entry["path"]),
         "modelType": model_entry.get("modelType", ""),
         "metadataOnly": bool(model_entry.get("metadataOnly")),
         "modelId": str(info.get("modelId")),

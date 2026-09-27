@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Clicking a `METADATA` row copies the path of the model file, with the
+  extension the sidecar names (usually `.safetensors`), instead of the path of
+  its `.civitai.info`.
+- **Fetch Missing Metadata** with **Refetch** no longer replaces a good
+  `.civitai.info` with an empty stub when Civitai cannot be reached or no
+  longer lists the model.
+- A model that was not found before and is found by a later **Fetch Missing
+  Metadata** now gets its full sidecar instead of keeping the stub.
+- The API key is sent only to Civitai over https. A preview link in a sidecar
+  written by another tool used to receive it.
+- Opening the panel in a fresh ComfyUI folder no longer erases the API key and
+  custom paths: ComfyUI reports every setting as changed when it registers them,
+  and those empty values were saved before the stored ones were loaded.
+- A `config.json` or `archived_updates.json` that cannot be read at startup is
+  never overwritten during that session. Files saved with a BOM or as UTF-16
+  load instead of being reset (or, for UTF-16, stopping the plugin from loading).
+- A check no longer reports an error, and drops the update it found, when the
+  sidecar next to the model cannot be written (a read-only folder, for example).
+- Saved results larger than 16 MB (a few thousand models) are no longer
+  ignored as if no check had run.
+- A sidecar date without a time zone no longer makes the result list fail.
+- A full **Bases** selection no longer hides models whose version has no base
+  model.
+- Collapsing every group no longer leaves an empty list with no header to
+  expand them again.
+- Reopening the tab keeps the Model Scope and option checkboxes, the status
+  line, and the "Last checked" line.
+- The scan report counts models that were not found.
+- A preview video that hangs ffmpeg no longer stalls the job.
+
 ## [1.8.1] - 2026-09-16
 
 ### Fixed

@@ -109,7 +109,10 @@ Each item is one model and carries `groupPrimary`, `groupSecondary`,
 - `isProvisional`
 
 Each local version includes `metadataOnly`, which is `true` when the installed
-version is represented only by a valid `.civitai.info` sidecar.
+version is represented only by a valid `.civitai.info` sidecar. `modelPath` is
+the file the entry was found through (the sidecar, for a metadata-only entry);
+`filePath` is always the weights file, where it would be for a metadata-only
+entry, with the extension the sidecar names (`.safetensors` when it names none).
 
 ## `GET /civitai-updater/last-check`
 
