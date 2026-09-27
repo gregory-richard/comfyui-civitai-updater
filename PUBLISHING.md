@@ -10,8 +10,9 @@
 3. Make sure the `REGISTRY_ACCESS_TOKEN` GitHub secret holds a valid Comfy
    Registry API key.
 4. Commit and push to `main`. Any push that touches `pyproject.toml` runs
-   `.github/workflows/publish_action.yml` and publishes to the Registry, so
-   keep version bumps in their own commit.
+   `.github/workflows/publish_action.yml`, which runs the test workflow first
+   and publishes to the Registry only if it passes. Keep version bumps in their
+   own commit.
 
 Manual alternative:
 

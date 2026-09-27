@@ -86,6 +86,7 @@ class JobManagerTests(unittest.TestCase):
         )
 
         self.assertEqual("EarlyAccess", versions[0]["availability"])
+        self.assertEqual("early", versions[0]["paid"])
 
     def test_grouping_uses_newest_local_date_and_archive_partition(self) -> None:
         remote_versions = [
@@ -431,6 +432,91 @@ class JobManagerTests(unittest.TestCase):
             sorted(remaining),
         )
         self.assertNotIn("job-1", self.manager._jobs)
+
+    def _newer(self, version_id: str = "v2", **extra) -> dict:
+        return {"versionId": version_id, "versionName": version_id, "versionDate": "2026-04-01T00:00:00Z",
+                "baseModel": "SDXL 1.0", **extra}
+
+    def _item(self, model_id: str, path: str, remote_versions: list[dict]) -> dict:
+        return make_item(
+            model_id=model_id, model_name=model_id, model_type="lora", local_version_id=f"{model_id}-v1",
+            local_version_name="v1", local_version_date="2026-01-01T00:00:00Z", base_model="SDXL 1.0",
+            model_path=path, remote_versions=remote_versions,
+        )
+
+    def test_issues_view_lists_failed_models_and_counts_both_views(self) -> None:
+        removed = self._item("m-gone", "C:\\models\\gone.safetensors", [])
+        removed.update(status="error", error="404 Not Found. The model may have been removed from Civitai.")
+        unknown = {"modelPath": "C:\\models\\merge.safetensors", "modelType": "lora", "status": "not_found", "modelId": ""}
+        current = self._item("m-ok", "C:\\models\\ok.safetensors", [self._newer()])
+        self.job.items = [removed, unknown, current]
+
+        issues = self.manager.get_items("job-1", mode="issues")
+
+        self.assertEqual(2, issues["total"])
+        self.assertEqual({"updates": 1, "issues": 2}, issues["modeCounts"])
+        rows = {card["localVersions"][0]["modelPath"]: card["localVersions"][0] for card in issues["items"]}
+        self.assertEqual("error", rows["C:\\models\\gone.safetensors"]["status"])
+        self.assertIn("404", rows["C:\\models\\gone.safetensors"]["error"])
+        self.assertEqual("not_found", rows["C:\\models\\merge.safetensors"]["status"])
+        updates = self.manager.get_items("job-1", mode="updates")
+        self.assertEqual(["m-ok"], [card["modelId"] for card in updates["items"]])
+
+    def test_only_cards_awaiting_their_recheck_are_provisional(self) -> None:
+        self.job.status = "running"
+        seeded = dict(self._item("m1", "C:\\models\\a.safetensors", [self._newer()]), _seeded=True)
+        rechecked = self._item("m2", "C:\\models\\b.safetensors", [self._newer()])
+        self.job.items = [seeded, rechecked]
+
+        cards = {card["modelId"]: card for card in self.manager.get_items("job-1", mode="updates")["items"]}
+
+        self.assertTrue(cards["m1"]["isProvisional"])
+        self.assertFalse(cards["m2"]["isProvisional"])
+
+    def test_pruning_keeps_the_newest_check(self) -> None:
+        from comfy_updater import jobs as jobs_module
+
+        self.manager._jobs = {"check": JobRecord(id="check", type="check-updates", status="completed",
+                                                 finishedAt="2026-01-01T00:00:00Z")}
+        for index in range(jobs_module._MAX_FINISHED_JOBS + 2):
+            record = JobRecord(id=f"scan-{index}", type="scan", status="completed",
+                               finishedAt=f"2026-02-{index + 1:02d}T00:00:00Z")
+            self.manager._jobs[record.id] = record
+
+        self.assertIsNotNone(self.manager.start("scan", lambda progress, item_cb, control: ({}, [])))
+
+        # The panel is still showing that check, however many scans ran since.
+        self.assertIn("check", self.manager._jobs)
+        self.assertNotIn("scan-0", self.manager._jobs)
+
+    def test_paid_access_is_read_and_a_closed_early_window_is_dropped(self) -> None:
+        versions = _normalize_remote_versions(
+            FakeCivitaiClient(),
+            "m1",
+            [
+                {"id": 1, "name": "always", "publishedAt": "2026-04-03T00:00:00Z",
+                 "paidAccess": {"permanent": True, "endsAt": None}},
+                {"id": 2, "name": "early", "publishedAt": "2026-04-02T00:00:00Z",
+                 "paidAccess": {"permanent": False, "endsAt": "2999-01-01T00:00:00Z"}},
+                {"id": 3, "name": "free", "publishedAt": "2026-04-01T00:00:00Z", "paidAccess": None},
+            ],
+        )
+        by_id = {version["versionId"]: version for version in versions}
+        self.assertEqual(("permanent", ""), (by_id["1"]["paid"], by_id["1"]["paidUntil"]))
+        self.assertEqual(("early", "2999-01-01T00:00:00Z"), (by_id["2"]["paid"], by_id["2"]["paidUntil"]))
+        self.assertEqual("", by_id["3"]["paid"])
+
+        # Results are cached; a window that closed since the check is free now.
+        closed = dict(by_id["2"], versionId="4", versionDate="2026-04-04T00:00:00Z", paidUntil="2020-01-01T00:00:00Z")
+        self.job.items = [self._item("m1", "C:\\models\\a.safetensors", [by_id["1"], by_id["2"], by_id["3"], closed])]
+
+        card = self.manager.get_items("job-1", mode="updates")["items"][0]
+
+        paid = {version["versionId"]: (version["paid"], version["paidUntil"]) for version in card["newVersions"]}
+        self.assertEqual(
+            {"1": ("permanent", ""), "2": ("early", "2999-01-01T00:00:00Z"), "3": ("", ""), "4": ("", "")},
+            paid,
+        )
 
     def test_grouping_aggregates_nsfw_flag(self) -> None:
         # Test grouped items

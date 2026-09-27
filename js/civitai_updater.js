@@ -95,6 +95,9 @@ const state = {
   forceRehash: false,
   refetchMetadata: false,
   statusText: "",
+  resultMode: "updates",
+  modeCounts: { updates: 0, issues: 0 },
+  stopRequested: false,
 
   rootEl: null,
   cacheInfoEl: null,
@@ -105,6 +108,7 @@ const state = {
   progressTextEl: null,
   scanReportEl: null,
   checkSummaryEl: null,
+  viewSwitchEl: null,
   filterTypeEl: null,
   filterBaseEl: null,
   arrangeEl: null,
@@ -232,6 +236,7 @@ async function renderTab(el) {
       </div>
       <div id="cu-scan-report" class="cu-scan-report"></div>
       <div id="cu-check-summary" class="cu-summary">No update check has run yet.</div>
+      <div id="cu-view-switch" class="cu-view-switch" role="tablist" aria-label="Results view" style="display:none"></div>
       <div class="cu-filters">
         <div id="cu-filter-type" class="cu-filter-slot"></div>
         <div id="cu-filter-base" class="cu-filter-slot"></div>
@@ -260,6 +265,7 @@ async function renderTab(el) {
   state.progressEtaEl = root.querySelector("#cu-progress-eta");
   state.scanReportEl = root.querySelector("#cu-scan-report");
   state.checkSummaryEl = root.querySelector("#cu-check-summary");
+  state.viewSwitchEl = root.querySelector("#cu-view-switch");
   state.filterTypeEl = root.querySelector("#cu-filter-type");
   state.filterBaseEl = root.querySelector("#cu-filter-base");
   state.arrangeEl = root.querySelector("#cu-arrange-slot");
@@ -372,6 +378,7 @@ function clearCurrentJob() {
   state.currentProgress = 0;
   state.currentTotal = 0;
   state.currentItemCount = 0;
+  state.stopRequested = false;
 }
 
 function isLostJobError(error) {
@@ -491,6 +498,20 @@ function bindEvents(root) {
   root.addEventListener("click", async (ev) => {
     const target = ev.target;
     if (!(target instanceof HTMLElement)) return;
+    const viewTab = target.closest("[data-view]");
+    if (viewTab) {
+      const mode = viewTab.dataset.view;
+      if (!mode || mode === state.resultMode) return;
+      state.resultMode = mode;
+      state.pageOffset = 0;
+      // The views list different models, so their filter options differ too.
+      state.filterTypes = null;
+      state.filterBases = null;
+      state.facets = { modelTypes: [], baseModels: [] };
+      renderFilters();
+      await loadResultPage(true);
+      return;
+    }
     const filterAction = target.dataset.filterAction;
     if (filterAction) {
       const key = target.dataset.filterKind === "type" ? "filterTypes" : "filterBases";
@@ -537,7 +558,8 @@ async function startJob(endpoint, type) {
     forceRehash,
   };
 
-  if (type === "check-updates" && !state.forceNextRecheck && !state.cacheFilesChanged && !forceRehash && state.cachedAt) {
+  if (type === "check-updates" && !state.forceNextRecheck && !state.cacheFilesChanged && !forceRehash && state.cachedAt
+      && coversSameScope(modelTypes)) {
     const ttl = Number(getSetting(SETTINGS.cacheTtlMinutes, 240)) * 60 * 1000;
     const age = Date.now() - new Date(state.cachedAt).getTime();
     if (ttl > 0 && age < ttl && state.cachedJobId) {
@@ -572,6 +594,7 @@ async function startJob(endpoint, type) {
       state.checkJobId = data.jobId;
       state.cachedJobId = data.jobId;
       state.checkSummary = null;
+      state.freshPaths.clear();
       state.pageOffset = 0;
       state.resultItems = [];
       state.resultTotal = 0;
@@ -595,6 +618,13 @@ async function startJob(endpoint, type) {
   }
 }
 
+/* Saved results answer a check only for the model types that check covered:
+   narrowing or widening Model Scope asks for a new one. */
+function coversSameScope(modelTypes) {
+  const lastTypes = Array.isArray(state.checkSummary?.modelTypes) ? state.checkSummary.modelTypes : MODEL_TYPES;
+  return lastTypes.length === modelTypes.length && modelTypes.every((type) => lastTypes.includes(type));
+}
+
 async function togglePauseResume() {
   if (!state.currentJobId) return;
   try {
@@ -613,9 +643,11 @@ async function togglePauseResume() {
 async function stopCurrentJob() {
   if (!state.currentJobId) return;
   try {
+    state.stopRequested = true;
     await postJson(`/civitai-updater/jobs/${state.currentJobId}/stop`, {});
-    setStatus("Stop requested.");
+    setStatus("Stopping\u2026");
   } catch (error) {
+    state.stopRequested = false;
     setStatus(`Failed to stop: ${error.message}`);
   }
 }
@@ -684,6 +716,9 @@ function pollJob(jobId) {
           // the view was bound to while it ran.
           state.checkJobId = jobId;
           state.cachedJobId = jobId;
+          // A stopped or failed check holds partial results: the next click
+          // must run a check instead of serving them as the cache.
+          if (status !== "completed") state.forceNextRecheck = true;
           if (job.summary && Object.keys(job.summary).length > 0) state.checkSummary = job.summary;
           await loadResultPage(true);
         }
@@ -759,7 +794,7 @@ async function loadResultPage(force) {
     const query = new URLSearchParams({
       offset: String(state.pageOffset),
       limit: String(state.pageSize),
-      mode: "updates",
+      mode: state.resultMode,
       sort: state.sortOrder || "name",
       showHidden: state.showHidden ? "1" : "0",
       groupBy: state.groupBy || "none",
@@ -785,6 +820,7 @@ async function loadResultPage(force) {
     state.startsMidPrimary = Boolean(data.startsMidPrimary);
     state.startsMidSecondary = Boolean(data.startsMidSecondary);
     state.matureHidden = Number(data.matureHidden || 0);
+    if (data.modeCounts) state.modeCounts = data.modeCounts;
     if (data.facets) {
       applyFacets(data.facets);
       renderFilters();
@@ -815,6 +851,10 @@ function summaryLine(s) {
 }
 
 function renderProgressCounts() {
+  if (state.stopRequested && state.currentJobId) {
+    setStatus("Stopping\u2026");
+    return;
+  }
   const s = state.currentSummary;
   if (!s || !s.mode) {
     if (state.currentJobId) {
@@ -927,14 +967,17 @@ function buildResultCard(item, cardIndex) {
   card.className = "cu-item";
   card.style.setProperty("--cu-i", String(Math.min(cardIndex, 12)));
   if (item.nsfw && state.matureMode === "blur") card.dataset.mature = "blur";
-  const path = (item.localVersions || [])[0]?.modelPath || "";
-  if (path && state.freshPaths.has(String(path).toLowerCase())) {
+  const path = String((item.localVersions || [])[0]?.modelPath || "").toLowerCase();
+  // Settle only once the card is final; a card still waiting for its
+  // re-check stays in the set until it is.
+  if (path && !item.isProvisional && state.freshPaths.has(path)) {
     card.classList.add("cu-settled");
-    state.freshPaths.delete(String(path).toLowerCase());
+    state.freshPaths.delete(path);
   }
+  const issuesView = state.resultMode === "issues";
   const localVersions = item.localVersions || [];
-  const newVersions = item.newVersions || [];
-  const hiddenVersions = state.showHidden ? (item.hiddenNewVersions || []) : [];
+  const newVersions = issuesView ? [] : (item.newVersions || []);
+  const hiddenVersions = !issuesView && state.showHidden ? (item.hiddenNewVersions || []) : [];
   const firstPath = localVersions.length ? localVersions[0].modelPath : "";
   const displayName = item.modelName ? escapeHtml(item.modelName) : escapeHtml(extractFilename(firstPath || "unknown"));
 
@@ -942,19 +985,12 @@ function buildResultCard(item, cardIndex) {
   const creatorHtml = item.creatorName ? `<span class="cu-creator">by ${escapeHtml(item.creatorName)}</span>` : "";
   const provisionalHtml = item.isProvisional ? `<span class="cu-provisional">Provisional</span>` : "";
 
-  const localRows = localVersions.map((v) => {
-    const date = v.publishedAt ? shortDate(v.publishedAt) : "";
-    const localRole = v.metadataOnly ? "metadata" : "saved";
-    const localLabel = v.metadataOnly ? "Metadata" : "Saved";
-    return `
-      <div class="cu-ver-row">
-        <span class="cu-ver-label" data-role="${localRole}">${localLabel}</span>
-        <span class="cu-ver-date">${escapeHtml(date || "—")}</span>
-        <span class="cu-ver-base">${escapeHtml(v.baseModel || "—")}</span>
-        <span class="cu-ver-main">
-          <span class="cu-ver-link cu-copy-path" data-path="${escapeHtml(v.filePath || v.modelPath || "")}" title="Click to copy file path">${escapeHtml(v.versionName || "?")}</span>
-        </span>
-      </div>`;
+  // Files of one model usually fail for one reason; print it once, under the
+  // last row of each run that shares it.
+  const localRows = localVersions.map((v, index) => {
+    const next = localVersions[index + 1];
+    const showMessage = !next || !ISSUE_LABELS[next.status] || issueMessage(next) !== issueMessage(v);
+    return renderLocalVersionRow(v, showMessage);
   }).join("");
 
   const newRows = newVersions.map((v) => renderRemoteVersionRow(item.modelId, v, false)).join("");
@@ -1002,13 +1038,54 @@ function buildResultCard(item, cardIndex) {
     });
   }
   card.querySelector(".cu-thumb").addEventListener("click", () => openLightbox(item));
+  // A removed model's preview URL is dead too; show the empty tile instead of
+  // the browser's broken-image icon.
+  card.querySelector(".cu-thumb img")?.addEventListener("error", (ev) => {
+    ev.currentTarget.replaceWith(Object.assign(document.createElement("div"), {
+      className: "cu-thumb-empty",
+      textContent: "No preview",
+    }));
+  });
   return card;
+}
+
+const ISSUE_LABELS = {
+  error: { role: "error", label: "Error" },
+  not_found: { role: "nomatch", label: "No match" },
+};
+
+function renderLocalVersionRow(v, showMessage = true) {
+  const issue = ISSUE_LABELS[v.status];
+  const date = v.publishedAt ? shortDate(v.publishedAt) : "";
+  const role = issue ? issue.role : (v.metadataOnly ? "metadata" : "saved");
+  const label = issue ? issue.label : (v.metadataOnly ? "Metadata" : "Saved");
+  const filePath = v.filePath || v.modelPath || "";
+  // A file Civitai never identified has no version name; its file name is
+  // what the user will recognize.
+  const name = v.versionName || extractFilename(filePath) || "?";
+  const message = issue && showMessage ? `<div class="cu-issue-msg">${escapeHtml(issueMessage(v))}</div>` : "";
+  return `
+      <div class="cu-ver-row">
+        <span class="cu-ver-label" data-role="${role}">${label}</span>
+        <span class="cu-ver-date">${escapeHtml(date || "\u2014")}</span>
+        <span class="cu-ver-base">${escapeHtml(v.baseModel || "\u2014")}</span>
+        <span class="cu-ver-main">
+          <span class="cu-ver-link cu-copy-path" data-path="${escapeHtml(filePath)}" title="Click to copy file path">${escapeHtml(name)}</span>
+        </span>
+      </div>${message}`;
+}
+
+function issueMessage(v) {
+  if (v.status === "not_found") {
+    return "Civitai has no release with this file's hash. It may be converted, merged, private, or never uploaded.";
+  }
+  return v.error || "The lookup failed.";
 }
 
 function resultsSignature() {
   // Everything that changes what the list looks like, and nothing that does not.
   return JSON.stringify([
-    state.checkJobId, state.resultOffset, state.resultTotal, state.pageSize,
+    state.checkJobId, state.resultMode, state.resultOffset, state.resultTotal, state.pageSize,
     state.groupBy, state.thenBy, state.sortOrder, state.matureMode,
     state.showHidden, state.matureHidden,
     [...state.collapsed].sort(),
@@ -1017,7 +1094,8 @@ function resultsSignature() {
     state.resultItems.map((item) => [
       item.modelId, item.groupPathKey, item.isProvisional ? 1 : 0,
       (item.newVersions || []).length, (item.hiddenNewVersions || []).length,
-      (item.localVersions || []).length, item.previewUrl,
+      (item.localVersions || []).length, item.previewUrl, item.issueCount || 0,
+      (item.newVersions || []).map((v) => v.paid || "").join(","),
     ]),
   ]);
 }
@@ -1027,13 +1105,14 @@ function resultsPageKey() {
   // replay the entry animation.
   // Collapsing is deliberately absent: folding one band away should not make
   // every remaining card animate in again.
-  return [state.checkJobId, state.resultOffset, state.pageSize, state.groupBy,
+  return [state.checkJobId, state.resultMode, state.resultOffset, state.pageSize, state.groupBy,
     state.thenBy, state.sortOrder, state.matureMode, state.showHidden,
     (state.filterTypes || []).join(","), (state.filterBases || []).join(",")].join("|");
 }
 
 function renderResults() {
   if (!state.resultsEl || !state.checkSummaryEl) return;
+  renderViewSwitch();
   if (state.checkSummary) {
     const s = state.checkSummary;
     state.checkSummaryEl.textContent = summaryLine(s);
@@ -1075,7 +1154,8 @@ function renderResults() {
     // With every band collapsed there are no cards, but the headers are
     // still the only way to expand them again.
     if (!hasCollapsedBand()) {
-      appendEmpty(state.resultTotal === 0 ? "No updates found." : "No items on this page.");
+      const none = state.resultMode === "issues" ? "No issues: every model was matched and checked." : "No updates found.";
+      appendEmpty(state.resultTotal === 0 ? none : "No items on this page.");
       renderPagination();
       return;
     }
@@ -1145,8 +1225,27 @@ function hasCollapsedBand() {
     || (group.subgroups || []).some((sub) => state.collapsed.has(sub.key)));
 }
 
+function renderViewSwitch() {
+  if (!state.viewSwitchEl) return;
+  if (!state.checkJobId) {
+    state.viewSwitchEl.innerHTML = "";
+    state.viewSwitchEl.style.display = "none";
+    return;
+  }
+  const counts = state.modeCounts || {};
+  const tab = (mode, label, hint) => {
+    const selected = state.resultMode === mode ? "true" : "false";
+    return `<button class="cu-view-tab" type="button" role="tab" data-view="${mode}" aria-selected="${selected}" title="${hint}">`
+      + `<span>${label}</span><span class="cu-view-count">${Number(counts[mode] || 0)}</span></button>`;
+  };
+  state.viewSwitchEl.innerHTML = tab("updates", "Updates", "Models with a newer release")
+    + tab("issues", "Issues", "Models Civitai could not match or check");
+  state.viewSwitchEl.style.display = "";
+}
+
 function countLabel(models, releases) {
   const modelWord = models === 1 ? "model" : "models";
+  if (state.resultMode === "issues") return `${models} ${modelWord}`;
   return `${models} ${modelWord} \u00b7 <b>${releases} new</b>`;
 }
 
@@ -1261,12 +1360,12 @@ function renderRemoteVersionRow(modelId, version, hidden) {
   const date = version.versionDate ? shortDate(version.versionDate) : "—";
   const name = escapeHtml(version.versionName || "?");
   const link = version.versionUrl
-    ? `<a class="cu-ver-link" href="${escapeHtml(version.versionUrl)}" target="_blank" rel="noreferrer noopener">${name}</a>`
-    : `<span class="cu-ver-link">${name}</span>`;
+    ? `<a class="cu-ver-link" href="${escapeHtml(version.versionUrl)}" target="_blank" rel="noreferrer noopener" title="${name}">${name}</a>`
+    : `<span class="cu-ver-link" title="${name}">${name}</span>`;
   const action = hidden
     ? `<button class="cu-inline-btn" data-archive-action="restore" data-model-id="${escapeHtml(modelId || "")}" data-version-id="${escapeHtml(version.versionId || "")}">Unarchive</button>`
     : `<button class="cu-inline-btn" data-archive-action="archive" data-model-id="${escapeHtml(modelId || "")}" data-version-id="${escapeHtml(version.versionId || "")}">Hide</button>`;
-  const accessBadge = renderAvailabilityBadge(version.availability);
+  const accessBadge = renderPaidBadge(version) || renderAvailabilityBadge(version.availability);
   const hiddenClass = hidden ? " is-hidden" : "";
   return `
     <div class="cu-ver-row${hiddenClass}">
@@ -1279,6 +1378,23 @@ function renderRemoteVersionRow(modelId, version, hidden) {
         ${action}
       </span>
     </div>`;
+}
+
+/* Buzz: downloading the release costs Buzz. Early access is free from its end
+   date (dashed badge); a permanent paywall has none (solid badge). Civitai's
+   public API gives no price. */
+function renderPaidBadge(version) {
+  if (version.paid === "permanent") {
+    return `<span class="cu-buzz" data-paid="permanent" title="Costs Buzz to download, with no free date.">Buzz \u00b7 always</span>`;
+  }
+  if (version.paid !== "early") return "";
+  const ends = version.paidUntil ? new Date(version.paidUntil) : null;
+  if (!ends || Number.isNaN(ends.getTime())) {
+    return `<span class="cu-buzz" data-paid="early" title="Early access: costs Buzz to download for now. Civitai gives no end date.">Buzz \u00b7 early</span>`;
+  }
+  const days = Math.max(1, Math.ceil((ends.getTime() - Date.now()) / 86400000));
+  const title = `Early access: costs Buzz to download until ${shortDate(version.paidUntil)}, free after that.`;
+  return `<span class="cu-buzz" data-paid="early" title="${escapeHtml(title)}">Buzz \u00b7 ${days}d left</span>`;
 }
 
 const AVAILABILITY_SHORT = { EarlyAccess: "Early", Private: "Private", Unsearchable: "Unlisted" };
@@ -1687,7 +1803,7 @@ function openLightbox(item) {
     const media = primaryNewVersion.previewType === "video"
       ? `<video src="${escapeHtml(primaryNewVersion.previewUrl)}" preload="auto" muted playsinline controls></video>`
       : `<img src="${escapeHtml(primaryNewVersion.previewUrl)}" alt="">`;
-    sections += `<div class="cu-lb-card"><div class="cu-lb-label" data-role="new">Newest release</div><div class="cu-lb-vname">${escapeHtml(primaryNewVersion.versionName || "?")}${latestBase}</div>${media}</div>`;
+    sections += `<div class="cu-lb-card"><div class="cu-lb-label" data-role="new">Newest release</div><div class="cu-lb-vname">${escapeHtml(primaryNewVersion.versionName || "?")}${latestBase}${renderPaidBadge(primaryNewVersion)}</div>${media}</div>`;
   }
 
   const overlay = document.createElement("div");
@@ -2293,6 +2409,62 @@ function injectStyles() {
       margin-bottom: 9px;
     }
 
+    /* ---- Updates / Issues switch ---- */
+
+    .cu-view-switch {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      margin-bottom: 8px;
+      border: 1px solid var(--cu-seam-strong);
+      border-radius: var(--cu-radius);
+      overflow: hidden;
+    }
+
+    .cu-view-tab {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      height: var(--cu-h-ctl);
+      margin: 0;
+      padding: 0 8px;
+      border: 0;
+      background: transparent;
+      color: var(--cu-ash);
+      font-family: var(--cu-body);
+      font-size: 11px;
+      cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease;
+    }
+
+    .cu-view-tab + .cu-view-tab {
+      border-left: 1px solid var(--cu-seam-strong);
+    }
+
+    .cu-view-tab:hover {
+      color: var(--cu-bone);
+    }
+
+    .cu-view-tab[aria-selected="true"] {
+      background: var(--cu-raise);
+      color: var(--cu-bone);
+    }
+
+    .cu-view-count {
+      font-family: var(--cu-mono);
+      font-size: 9.5px;
+      font-variant-numeric: tabular-nums;
+      color: var(--cu-dust);
+    }
+
+    .cu-view-tab[data-view="updates"][aria-selected="true"] .cu-view-count {
+      color: var(--cu-red-soft);
+    }
+
+    .cu-view-tab[data-view="issues"][aria-selected="true"] .cu-view-count {
+      color: var(--cu-amber);
+    }
+
     @container (max-width: 330px) {
       .cu-filters {
         grid-template-columns: 1fr;
@@ -2802,6 +2974,37 @@ function injectStyles() {
       border-color: var(--cu-seam-strong);
     }
 
+    /* Issues are amber, never red: red means a new release exists. */
+
+    .cu-ver-label[data-role="error"] {
+      color: var(--cu-amber);
+    }
+
+    .cu-ver-label[data-role="error"]::before {
+      background: var(--cu-amber);
+      border-color: var(--cu-amber);
+    }
+
+    .cu-ver-label[data-role="nomatch"] {
+      color: var(--cu-ash);
+    }
+
+    .cu-ver-label[data-role="nomatch"]::before {
+      border-style: dashed;
+      border-color: var(--cu-ash);
+    }
+
+    /* The reason sits under its row, aligned with the columns after the label. */
+
+    .cu-issue-msg {
+      margin: -3px 0 1px 70px;
+      font-family: var(--cu-mono);
+      font-size: 9.5px;
+      line-height: 1.4;
+      color: var(--cu-dust);
+      overflow-wrap: anywhere;
+    }
+
     .cu-ver-date,
     .cu-ver-base {
       font-family: var(--cu-mono);
@@ -2864,6 +3067,33 @@ function injectStyles() {
       padding: 1px 5px;
       white-space: nowrap;
       flex: 0 0 auto;
+    }
+
+    /* Self-contained (no panel tokens) so it also renders in the lightbox. */
+
+    .cu-buzz {
+      font-family: "IBM Plex Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+      font-size: 8.5px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #d2a24c;
+      background: rgba(210, 162, 76, 0.07);
+      border: 1px dashed rgba(210, 162, 76, 0.5);
+      border-radius: 3px;
+      padding: 1px 5px;
+      white-space: nowrap;
+      flex: 0 0 auto;
+    }
+
+    .cu-buzz[data-paid="permanent"] {
+      border-style: solid;
+      background: rgba(210, 162, 76, 0.16);
+    }
+
+    .cu-lb-vname .cu-buzz {
+      margin-left: 6px;
+      vertical-align: 1px;
     }
 
     .cu-inline-btn {

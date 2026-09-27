@@ -5,6 +5,8 @@ on:
     branches:
       - main
   pull_request:
+  # The publish workflow runs these first, so a failing build is never released.
+  workflow_call:
 
 jobs:
   pytest:
@@ -35,3 +37,13 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -q
+
+  panel-script:
+    name: Panel script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check syntax
+        run: node --check js/civitai_updater.js

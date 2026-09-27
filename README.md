@@ -24,9 +24,21 @@ left says where each version stands:
 | ○ | `METADATA` | Tracked from a `.civitai.info` sidecar with no model weights next to it. |
 | ● | `NEW` | Published after your newest local version. Click the name to open it on Civitai. |
 | ● | `HIDDEN` | A new release you chose to hide. Shown only with **Show hidden** on. |
+| ● | `ERROR` | Civitai could not be asked about this model, or refused (removed, needs an API key). The reason is printed under the row. |
+| ◌ | `NO MATCH` | Civitai has no release with this file's hash: a merge, a conversion, or never uploaded. |
 
 Red means exactly one thing: a release exists that you do not have. A quiet
-card is an up-to-date card.
+card is an up-to-date card. `ERROR` and `NO MATCH` rows are amber and grey, and
+they live in the **Issues** view, next to **Updates** above the list.
+
+A new release that costs Buzz to download carries a badge:
+
+- **Buzz · 5d left** (dashed): early access. It becomes free on the date in the
+  tooltip.
+- **Buzz · always** (solid): the release has no free date.
+
+Civitai's public API says which releases are paid and until when, but not the
+price.
 
 Base models are grouped by family, because Civitai records one per version and
 the spellings multiply: `Flux.1 D`, `Flux.2 Klein 9B` and `Flux.2 Klein 9B-base`
@@ -84,8 +96,9 @@ Requires Python 3.9+. Pulls in `requests`, `Pillow`, and `imageio-ffmpeg`
 Under **Settings → Civitai Updater**:
 
 - **API key** — optional, but some restricted resources need one.
-- **Cache duration** — how long results stay fresh before a re-check is
-  suggested. The panel also notices when model files are added or removed.
+- **Cache duration** — how long **Check for Updates** shows the saved results
+  instead of checking again. Changing **Model Scope**, adding or removing model
+  files, or clicking **Refresh** runs a real check inside that window.
 - **Timeout, retries, delay between models** — for slow or rate-limited runs.
 - **Treat `.civitai.info` as installed** — count a valid orphan sidecar as an
   installed version, so a model you deleted but still track keeps reporting

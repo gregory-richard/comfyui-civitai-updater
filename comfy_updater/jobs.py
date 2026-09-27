@@ -13,6 +13,8 @@ _MAX_FINISHED_JOBS = 5
 
 GROUP_KEYS = ("none", "type", "baseFamily")
 MATURE_MODES = ("show", "blur", "hide")
+RESULT_MODES = ("updates", "issues")
+ISSUE_STATUSES = ("error", "not_found")
 GROUP_PATH_SEPARATOR = "||"
 _UNGROUPED_LABEL = "Ungrouped"
 
@@ -162,17 +164,15 @@ class JobManager:
             items = list(job.items)
             provisional = job.status in ("running", "queued", "paused")
 
-        grouped = _group_items_by_model(
+        all_groups = _group_items_by_model(
             items,
             archived_versions=self._archived_snapshot(),
             provisional=provisional,
         )
 
-        if mode == "updates":
-            grouped = [
-                g for g in grouped
-                if g.get("hasUpdate") or (show_hidden and g.get("hasHiddenUpdates"))
-            ]
+        grouped = all_groups
+        if mode in RESULT_MODES:
+            grouped = [g for g in grouped if _in_mode(g, mode, show_hidden)]
 
         available_types: set[str] = set()
         available_bases: set[str] = set()
@@ -185,23 +185,15 @@ class JobManager:
                 if base_model:
                     available_bases.add(base_model)
 
-        model_type_set = set(model_types or [])
-        base_model_set = set(base_models or [])
-
-        if model_types is not None:
-            grouped = [g for g in grouped if g.get("modelType", "") in model_type_set]
-        if base_models is not None:
-            grouped = [
-                g for g in grouped
-                if any(lv.get("baseModel", "") in base_model_set for lv in g.get("localVersions", []))
-            ]
-
         mature_mode = mature if mature in MATURE_MODES else "show"
-        mature_hidden = 0
-        if mature_mode == "hide":
-            before = len(grouped)
-            grouped = [g for g in grouped if not g.get("nsfw")]
-            mature_hidden = before - len(grouped)
+        grouped, mature_hidden = _filter_groups(grouped, model_types, base_models, mature_mode)
+        # What each view would list under the same filters, so the panel can
+        # label its Updates / Issues switch without a second request.
+        filtered_all, _ = _filter_groups(all_groups, model_types, base_models, mature_mode)
+        mode_counts = {
+            name: sum(1 for group in filtered_all if _in_mode(group, name, show_hidden))
+            for name in RESULT_MODES
+        }
 
         grouped = _sort_grouped(grouped, sort)
 
@@ -246,6 +238,7 @@ class JobManager:
             "startsMidSecondary": starts_mid_secondary,
             "matureHidden": mature_hidden,
             "matureMode": mature_mode,
+            "modeCounts": mode_counts,
             "collapsed": sorted(collapsed_set),
         }
 
@@ -313,6 +306,7 @@ class JobManager:
                 return job
             if job.control:
                 job.control.cancel()
+            job.message = "Stopping"
             if job.status == "queued":
                 job.status = "cancelled"
                 job.finishedAt = _utc_now()
@@ -386,8 +380,12 @@ class JobManager:
         if len(finished) <= _MAX_FINISHED_JOBS:
             return
         finished.sort(key=lambda job: job.finishedAt or "", reverse=True)
+        # The panel stays bound to the last check's results however many scans
+        # ran since, so that job is never the one dropped.
+        newest_check = next((job for job in finished if job.type == "check-updates"), None)
         for job in finished[_MAX_FINISHED_JOBS:]:
-            self._jobs.pop(job.id, None)
+            if job is not newest_check:
+                self._jobs.pop(job.id, None)
 
     def _archived_snapshot(self) -> dict[str, set[str]]:
         if not self.archive_store:
@@ -612,6 +610,8 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
                     "metadataOnly": bool(member.get("metadataOnly")),
                     "previewUrl": member.get("localPreviewUrl", ""),
                     "previewType": member.get("localPreviewType", "image"),
+                    "status": member.get("status", ""),
+                    "error": member.get("error", ""),
                 }
             )
         if local_version_id:
@@ -633,6 +633,7 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
                     "versionUrl": remote_version.get("versionUrl", ""),
                     "downloadUrl": remote_version.get("downloadUrl", ""),
                     "availability": remote_version.get("availability", ""),
+                    **_paid_access_now(remote_version),
                 }
 
     # A local version without a date cannot be compared, and an empty newest
@@ -672,6 +673,7 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
     primary_any = primary_visible or (hidden_versions[0] if hidden_versions else {})
     local_preview = next((version for version in local_versions if version.get("previewUrl")), {})
     nsfw = any(bool(member.get("nsfw")) for member in members)
+    issue_count = sum(1 for version in local_versions if version.get("status") in ISSUE_STATUSES)
 
     # A model page can carry releases on several base models, so the card is
     # filed under the base of the release it is headlining, and every row still
@@ -697,7 +699,10 @@ def _build_group(model_id: str, members: list[dict], archived_ids: set[str], pro
         "modelName": model_name,
         "creatorName": creator_name,
         "modelUrl": model_url,
-        "isProvisional": provisional,
+        # Only a card still built from the previous check's results is
+        # provisional; one whose files were re-checked already is final.
+        "isProvisional": provisional and any(member.get("_seeded") for member in members),
+        "issueCount": issue_count,
         "hasUpdate": bool(new_versions),
         "hasHiddenUpdates": bool(hidden_versions),
         "hasAnyUpdate": bool(new_versions or hidden_versions),
@@ -734,6 +739,8 @@ def _build_ungrouped_item(item: dict, provisional: bool) -> dict:
             "metadataOnly": bool(item.get("metadataOnly")),
             "previewUrl": item.get("localPreviewUrl", ""),
             "previewType": item.get("localPreviewType", "image"),
+            "status": item.get("status", ""),
+            "error": item.get("error", ""),
         }
     ]
     return {
@@ -742,7 +749,8 @@ def _build_ungrouped_item(item: dict, provisional: bool) -> dict:
         "modelName": item.get("modelName", "") or _filename(item.get("modelPath", "")),
         "creatorName": item.get("creatorName", ""),
         "modelUrl": item.get("modelUrl", ""),
-        "isProvisional": provisional,
+        "isProvisional": provisional and bool(item.get("_seeded")),
+        "issueCount": 1 if item.get("status") in ISSUE_STATUSES else 0,
         "hasUpdate": False,
         "hasHiddenUpdates": False,
         "hasAnyUpdate": False,
@@ -790,6 +798,54 @@ def _sort_grouped(items: list[dict], sort: str | None) -> list[dict]:
             key=lambda group: (-int(group.get("daysBehind") or 0), (group.get("modelName") or "").lower()),
         )
     return items
+
+
+def _in_mode(group: dict, mode: str, show_hidden: bool) -> bool:
+    if mode == "updates":
+        return bool(group.get("hasUpdate") or (show_hidden and group.get("hasHiddenUpdates")))
+    if mode == "issues":
+        return bool(group.get("issueCount"))
+    return True
+
+
+def _filter_groups(
+    groups: list[dict],
+    model_types: list[str] | None,
+    base_models: list[str] | None,
+    mature_mode: str,
+) -> tuple[list[dict], int]:
+    """Apply the type, base and mature filters; return the kept groups and how
+    many mature ones were hidden."""
+    if model_types is not None:
+        type_set = set(model_types)
+        groups = [g for g in groups if g.get("modelType", "") in type_set]
+    if base_models is not None:
+        base_set = set(base_models)
+        groups = [
+            g for g in groups
+            if any(lv.get("baseModel", "") in base_set for lv in g.get("localVersions", []))
+        ]
+    mature_hidden = 0
+    if mature_mode == "hide":
+        before = len(groups)
+        groups = [g for g in groups if not g.get("nsfw")]
+        mature_hidden = before - len(groups)
+    return groups, mature_hidden
+
+
+def _paid_access_now(version: dict) -> dict:
+    """The Buzz paywall of a release as it stands today.
+
+    Results are cached for hours or days, and an early-access window can close
+    in between, so an expired one is dropped here rather than when checked.
+    """
+    paid = version.get("paid", "")
+    paid_until = version.get("paidUntil", "")
+    if paid == "early" and paid_until:
+        ends = _parse_iso(paid_until)
+        if ends and ends <= datetime.now(timezone.utc):
+            return {"paid": "", "paidUntil": ""}
+    return {"paid": paid, "paidUntil": paid_until if paid == "early" else ""}
 
 
 def _file_path(item: dict) -> str:

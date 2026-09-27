@@ -87,7 +87,9 @@ Both carry `sidecarWarnings`, `modelTypes`, and `includeCustomPaths`.
 Query parameters:
 
 - `offset`, `limit`: paging over cards (limit is capped at 500)
-- `mode`: `updates` to list only models with a newer release
+- `mode`: `updates` to list only models with a newer release, `issues` to list
+  only models with a file Civitai could not match (`not_found`) or check
+  (`error`); omitted lists every model
 - `modelType`, `baseModel`: repeatable filters
 - `showHidden`: `1` to include releases you hid
 - `sort`: `name` | `name-desc` | `type` | `latest-date` | `latest-date-desc` | `behind`
@@ -98,7 +100,9 @@ Query parameters:
 Response fields: `jobId`, `totalItems`, `offset`, `limit`, `mode`, `facets`,
 `groups` (the outline with counts for the whole result set), `grouping`,
 `startsMidPrimary` / `startsMidSecondary` (whether the page opens inside a
-group that began earlier), `matureHidden`, `matureMode`, `items`.
+group that began earlier), `matureHidden`, `matureMode`, `modeCounts`
+(`{updates, issues}`: how many models each view lists under the same filters),
+`items`.
 
 Each item is one model and carries `groupPrimary`, `groupSecondary`,
 `groupPrimaryKey`, `groupPathKey`, and:
@@ -106,9 +110,18 @@ Each item is one model and carries `groupPrimary`, `groupSecondary`,
 - `localVersions`
 - `newVersions`
 - `hiddenNewVersions`
-- `isProvisional`
+- `isProvisional`: the card still comes from the previous check's results
+  while a check runs
+- `issueCount`: how many of its local versions are `error` or `not_found`
 
-Each local version includes `metadataOnly`, which is `true` when the installed
+Each new or hidden version carries `paid`: `permanent` (downloading costs Buzz,
+with no free date), `early` (early access, free from `paidUntil`, which is empty
+when Civitai gives no end), or empty. An early-access window that has closed
+since the check reads as empty.
+
+Each local version carries the file's check `status` (`ok`, `error`,
+`not_found`) and, for `error`, the `error` message. It also includes
+`metadataOnly`, which is `true` when the installed
 version is represented only by a valid `.civitai.info` sidecar. `modelPath` is
 the file the entry was found through (the sidecar, for a metadata-only entry);
 `filePath` is always the weights file, where it would be for a metadata-only

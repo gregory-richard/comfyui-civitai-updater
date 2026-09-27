@@ -2,7 +2,29 @@
 
 ## [Unreleased]
 
+### Added
+- An **Issues** view next to **Updates** lists the models Civitai could not
+  match (`No match`) or check (`Error`), with the reason under each file. Until
+  now they were only counts in the summary line.
+- New releases that cost Buzz to download are badged: **Buzz · 5d left** for
+  early access (free after the date in the tooltip), **Buzz · always** for a
+  release with no free date. The public API gives no price. The old `Early`
+  badge relied on an `availability` value Civitai no longer reports.
+
 ### Fixed
+- **Check for Updates** within the cache duration showed the saved results even
+  after Model Scope was changed, or after the last check was stopped. Both now
+  run a check.
+- Only the cards still waiting for their re-check are marked `Provisional`
+  during a check, instead of every card until the job ends. Each card settles
+  as its own files finish.
+- The results the panel shows are no longer dropped after about six later
+  **Fetch Missing Metadata** runs, which showed "The server was restarted" on
+  the next page click.
+- **Stop** no longer waits for a large file to finish hashing, or for Civitai
+  retries to run out. The panel says `Stopping…` until the job ends.
+- The Registry release workflow runs the tests first and publishes only when
+  they pass. CI also checks the panel script's syntax.
 - Clicking a `METADATA` row copies the path of the model file, with the
   extension the sidecar names (usually `.safetensors`), instead of the path of
   its `.civitai.info`.
@@ -137,6 +159,9 @@
 - The availability badge no longer truncates to `EARLY ACC...` in a narrow row.
 
 ## [1.5.0] - 2026-08-28
+
+Never published on its own: the version in `pyproject.toml` went from 1.4.1
+straight to 1.6.0, so these changes first reached the Registry in 1.6.0.
 
 ### Added
 - Re-running Check for Updates no longer starts from an empty panel: the previous results are carried over as provisional entries and each card refreshes in place as its model is re-checked — so after downloading a new version, a refresh immediately shows the current state instead of a blank list.

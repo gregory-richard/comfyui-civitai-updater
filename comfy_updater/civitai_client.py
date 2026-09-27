@@ -24,9 +24,12 @@ except Exception:  # pragma: no cover - optional import guard
 
 
 class CivitaiClient:
-    def __init__(self, api_key: str, timeout_seconds: int, max_retries: int):
+    def __init__(self, api_key: str, timeout_seconds: int, max_retries: int, should_stop=None):
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
+        # Checked between retries, so a stopped job does not sit through the
+        # whole back-off when Civitai is failing.
+        self.should_stop = should_stop
         self.session = requests.Session()
         # Caches the model payload, None for a silent miss, or the error that
         # a strict lookup raised, so several files of one model share a call.
@@ -241,6 +244,8 @@ class CivitaiClient:
                     return None
                 last_error = f"{response.status_code} {response.reason}"
 
+            if self.should_stop and self.should_stop():
+                break
             if attempt < self.max_retries:
                 time.sleep(_retry_delay_seconds(attempt))
 

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from aiohttp import web
 
 from .constants import CACHE_SCHEMA_VERSION, SUPPORTED_MODEL_TYPES
-from .jobs import MATURE_MODES, _normalize_cached_item_urls
+from .jobs import MATURE_MODES, RESULT_MODES, _normalize_cached_item_urls
 from .path_resolver import normalize_model_types
 from .sidecar import read_data_file, write_json
 from .updater_service import sidecar_seed_item
@@ -215,7 +215,7 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
         offset = _read_int_query(request, "offset", default=0, minimum=0, maximum=10_000_000)
         limit = _read_int_query(request, "limit", default=25, minimum=1, maximum=500)
         mode = request.query.get("mode", "").strip().lower() or None
-        if mode not in (None, "updates"):
+        if mode is not None and mode not in RESULT_MODES:
             return web.json_response({"error": "invalid mode"}, status=400)
         model_types = _read_multi_query(request, "modelType")
         base_models = _read_multi_query(request, "baseModel")
@@ -250,6 +250,7 @@ def register_routes(config_store, updater_service, job_manager, archive_store) -
                 "startsMidSecondary": result["startsMidSecondary"],
                 "matureHidden": result["matureHidden"],
                 "matureMode": result["matureMode"],
+                "modeCounts": result["modeCounts"],
                 "items": result["items"],
             }
         )

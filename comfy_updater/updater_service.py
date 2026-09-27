@@ -8,7 +8,7 @@ from typing import Callable
 from .civitai_client import CivitaiClient, CivitaiRequestError
 from .path_resolver import list_model_files, normalize_model_types, resolve_model_roots
 from .sidecar import info_sidecar_path, preview_sidecar_path, read_json, write_json
-from .hashing import sha256_file
+from .hashing import HashingCancelled, sha256_file
 
 ProgressCallback = Callable[[int, int, str], None]
 ItemCallback = Callable[[dict], None]
@@ -98,10 +98,12 @@ class UpdaterService:
 
         progress(0, total, f"Discovered {total} model files")
 
+        should_stop = control.is_cancelled if control else None
         client = CivitaiClient(
             api_key=config.get("apiKey", ""),
             timeout_seconds=int(config.get("requestTimeoutSeconds", 30)),
             max_retries=int(config.get("maxRetries", 4)),
+            should_stop=should_stop,
         )
 
         stats = {
@@ -138,7 +140,10 @@ class UpdaterService:
                     info_path=info_path,
                     preview_path=preview_path,
                     metadata_only=metadata_only,
+                    should_stop=should_stop,
                 )
+            except HashingCancelled:
+                break
             except Exception as exc:  # noqa: BLE001 - return per-file errors without killing the whole job
                 item = {
                     "modelPath": str(model_path),
@@ -153,6 +158,10 @@ class UpdaterService:
                     "nsfw": False,
                     "lastCheckedAt": _utc_now(),
                 }
+            # A lookup cut short by Stop can look like "not found"; the job is
+            # over anyway, so it is not reported.
+            if control and control.is_cancelled():
+                break
             # modelPath is the sidecar for a metadata-only entry, so the card
             # copies this path to the weights instead.
             item["filePath"] = str(model_entry.get("filePath") or model_path)
@@ -212,6 +221,7 @@ class UpdaterService:
         info_path: Path | None = None,
         preview_path: Path | None = None,
         metadata_only: bool = False,
+        should_stop=None,
     ) -> dict:
         info_path = info_path or info_sidecar_path(model_path)
         preview_path = preview_path or preview_sidecar_path(model_path)
@@ -272,7 +282,10 @@ class UpdaterService:
             # A stub sidecar already holds the file's hash: reuse it so a model
             # Civitai did not know last time is retried with one API call
             # instead of re-hashing gigabytes. Force rehash bypasses this.
-            file_hash = stored_hash if (stored_hash and not force_rehash) else sha256_file(model_path)
+            if stored_hash and not force_rehash:
+                file_hash = stored_hash
+            else:
+                file_hash = sha256_file(model_path, should_stop=should_stop)
             return file_hash, client.get_version_by_hash(file_hash)
 
         if can_use_sidecar:
@@ -629,6 +642,7 @@ def _normalize_remote_versions(
                 "versionUrl": client.version_page_url(model_id, version_id),
                 "downloadUrl": _first_download_url(version_data) or "",
                 "availability": _version_availability(version_data),
+                **_paid_access(version_data),
             }
         )
     normalized.sort(
@@ -636,6 +650,26 @@ def _normalize_remote_versions(
         reverse=True,
     )
     return normalized
+
+
+def _paid_access(version_data: dict) -> dict:
+    """Whether downloading a release costs Buzz, and until when.
+
+    ``paid`` is "permanent" (no free date), "early" (early access: free from
+    ``paidUntil``, which can be empty when Civitai gives no end), or "".
+    Civitai's public API names no price.
+    """
+    access = version_data.get("paidAccess")
+    if isinstance(access, dict):
+        if access.get("permanent"):
+            return {"paid": "permanent", "paidUntil": ""}
+        ends_at = access.get("endsAt") or version_data.get("earlyAccessDeadline")
+        return {"paid": "early", "paidUntil": ends_at if isinstance(ends_at, str) else ""}
+    # Releases fetched before paidAccess existed flag early access this way.
+    if version_data.get("availability") == "EarlyAccess":
+        deadline = version_data.get("earlyAccessDeadline")
+        return {"paid": "early", "paidUntil": deadline if isinstance(deadline, str) else ""}
+    return {"paid": "", "paidUntil": ""}
 
 
 def _version_availability(version_data: dict) -> str:
