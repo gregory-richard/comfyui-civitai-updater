@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.9.0] - 2026-10-04
 
 ### Added
 - An **Issues** view next to **Updates** lists the models Civitai could not
